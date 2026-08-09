@@ -1,0 +1,5 @@
+.DS_Store
+build/bin/
+build/ai/
+frontend/wailsjs/
+/.idea

@@ -1,0 +1,19 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "NTerm",
+  "outputfilename": "NTerm",
+  "frontend:dir": "frontend",
+  "frontend:install": "",
+  "frontend:build": "",
+  "frontend:dev:watcher": "",
+  "preBuildHooks": {
+    "darwin/arm64": "../../scripts/prepare-ai-assets.sh"
+  },
+  "postBuildHooks": {
+    "darwin/arm64": "../../scripts/package-ai-assets.sh"
+  },
+  "author": {
+    "name": "NTerm contributors",
+    "email": ""
+  }
+}

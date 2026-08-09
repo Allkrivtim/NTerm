@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <title>NTerm</title>
+    <link rel="stylesheet" href="vendor/xterm/xterm.css" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <nav class="tabbar" aria-label="Terminal tabs">
+        <div class="tab-list" id="tab-list" role="tablist"></div>
+        <button class="quiet-button" id="new-tab-button" aria-label="New tab" title="New tab (⌘T)">
+          <svg aria-hidden="true" viewBox="0 0 20 20"><path d="M10 4v12M4 10h12"/></svg>
+        </button>
+        <span class="tabbar-spacer"></span>
+        <button class="quiet-button" id="settings-button" aria-label="Settings" title="Settings (⌘,)">
+          <svg aria-hidden="true" viewBox="0 0 20 20"><path d="M4 5h12M4 10h12M4 15h12M7 3v4M13 8v4M8 13v4"/></svg>
+        </button>
+      </nav>
+
+      <main class="terminal" id="terminal">
+        <section class="blocks" id="blocks" aria-live="polite"></section>
+        <div class="bottom-spacer"></div>
+      </main>
+
+      <section class="tui-shell" id="tui-shell" aria-label="Interactive terminal" aria-hidden="true">
+        <div class="tui-terminal" id="tui-terminal"></div>
+      </section>
+
+      <section class="composer-zone">
+        <div class="composer" id="composer">
+          <div class="editor-wrap">
+            <pre class="syntax-highlight" id="syntax-highlight" aria-hidden="true"></pre>
+            <div class="ghost" id="ghost" aria-hidden="true"></div>
+            <textarea
+              id="command-editor"
+              rows="1"
+              autocomplete="off"
+              autocapitalize="off"
+              autocorrect="off"
+              spellcheck="false"
+              aria-label="Command editor"
+              placeholder="Type a command…"
+            ></textarea>
+            <div class="suggestions" id="suggestions" role="listbox" hidden></div>
+          </div>
+          <div class="composer-context">
+            <span class="cwd" id="cwd" title="Current directory">Loading…</span>
+            <span class="context-separator" id="git-separator" aria-hidden="true" hidden></span>
+            <span class="git-context" id="git-context" hidden>
+              <svg class="git-icon" aria-hidden="true" viewBox="0 0 16 16">
+                <circle cx="5" cy="3.5" r="1.5"></circle>
+                <circle cx="11" cy="12.5" r="1.5"></circle>
+                <path d="M5 5v3.2c0 2.4 1.5 3.3 4.5 3.3M5 7.5h2.2C9.8 7.5 11 6.4 11 4V3"></path>
+              </svg>
+              <span class="git-repository" id="git-repository"></span>
+              <span class="git-branch" id="git-branch"></span>
+              <span class="git-sync" id="git-sync" hidden></span>
+              <span class="git-changes" id="git-changes"></span>
+            </span>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div class="settings-layer" id="settings-layer" hidden>
+      <button class="settings-backdrop" id="settings-backdrop" aria-label="Close settings"></button>
+      <section class="settings-panel" id="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <header class="settings-header">
+          <div>
+            <h1 id="settings-title">Settings</h1>
+            <p>Changes apply to this device.</p>
+          </div>
+          <button class="quiet-button" id="settings-close" aria-label="Close settings">
+            <svg aria-hidden="true" viewBox="0 0 20 20"><path d="m5 5 10 10M15 5 5 15"/></svg>
+          </button>
+        </header>
+
+        <form id="settings-form">
+          <fieldset class="settings-group">
+            <legend>Appearance</legend>
+            <div class="settings-row settings-row-stack">
+              <label>Theme</label>
+              <div class="segmented-control" id="theme-control">
+                <label><input type="radio" name="theme" value="system"><span>System</span></label>
+                <label><input type="radio" name="theme" value="light"><span>Light</span></label>
+                <label><input type="radio" name="theme" value="dark"><span>Dark</span></label>
+              </div>
+            </div>
+            <label class="settings-row">
+              <span><strong>Terminal font</strong><small>Used for commands and output</small></span>
+              <select id="font-family" name="fontFamily">
+                <option>SF Mono</option>
+                <option>Menlo</option>
+                <option>Monaco</option>
+                <option>Cascadia Code</option>
+                <option>JetBrains Mono</option>
+              </select>
+            </label>
+            <label class="settings-row">
+              <span><strong>Font size</strong><small>10–24 pixels</small></span>
+              <input class="number-input" id="font-size" name="fontSize" type="number" min="10" max="24" step="1">
+            </label>
+          </fieldset>
+
+          <fieldset class="settings-group">
+            <legend>New tabs</legend>
+            <label class="settings-row settings-row-stack">
+              <span><strong>Default directory</strong><small>Supports ~ for your home folder</small></span>
+              <input class="text-input" id="default-path" name="defaultPath" type="text" spellcheck="false" autocomplete="off">
+            </label>
+            <label class="settings-row settings-row-stack">
+              <span><strong>Shell</strong><small>Leave empty to use your system shell</small></span>
+              <input class="text-input" id="shell-path" name="shell" type="text" spellcheck="false" autocomplete="off" placeholder="Automatic">
+            </label>
+          </fieldset>
+
+          <fieldset class="settings-group">
+            <legend>Autocomplete</legend>
+            <label class="settings-row">
+              <span><strong>Smart autocomplete</strong><small>Local model, never executes a suggestion</small></span>
+              <input class="switch" id="ai-enabled" name="aiEnabled" type="checkbox">
+            </label>
+            <div class="ai-status" id="ai-status" data-state="checking">
+              <span class="ai-status-dot" aria-hidden="true"></span>
+              <span id="ai-status-message">Checking local model…</span>
+            </div>
+          </fieldset>
+
+          <fieldset class="settings-group">
+            <legend>Interface</legend>
+            <label class="settings-row">
+              <span><strong>Reduce transparency</strong><small>Use solid functional surfaces</small></span>
+              <input class="switch" id="reduce-transparency" name="reduceTransparency" type="checkbox">
+            </label>
+            <label class="settings-row">
+              <span><strong>Command metadata</strong><small>Show directory, status and duration</small></span>
+              <input class="switch" id="show-block-metadata" name="showBlockMetadata" type="checkbox">
+            </label>
+          </fieldset>
+
+          <div class="settings-error" id="settings-error" role="alert" hidden></div>
+          <footer class="settings-footer">
+            <button class="text-button" id="settings-reset" type="button">Reset</button>
+            <button class="done-button" type="submit">Done</button>
+          </footer>
+        </form>
+      </section>
+    </div>
+    <script src="vendor/xterm/xterm.js"></script>
+    <script src="vendor/xterm/addon-fit.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
