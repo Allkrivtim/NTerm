@@ -2,7 +2,7 @@
 
 The self-contained macOS build includes these local AI components:
 
-- **llama.cpp / llama-server**, MIT License, pinned to the b9840-compatible
+- **llama.cpp / llama-server**, MIT License, pinned to the b9637
   runtime used by NTerm. Source: https://github.com/ggml-org/llama.cpp
 - **Qwen2.5-Coder-0.5B-Instruct GGUF**, Apache License 2.0, Q4_K_M
   quantization. Source: https://huggingface.co/Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF

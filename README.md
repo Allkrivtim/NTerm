@@ -1,119 +1,84 @@
-# WARNING! ALPHA VERSION WAS BUILD WITH AI. USE AT YOUR OWN RISK.
-## NTerm
+# NTerm
 
-<<<<<<< HEAD
-Block based terminal. Liquid Glass style.
-=======
+NTerm is a native macOS block-based terminal written in Go. Commands are
+composed in an editor and their command, streamed output, status, duration and
+working directory stay together as selectable blocks.
 
-NTerm is a Go desktop terminal prototype built around command blocks. Write a
-command in a real multiline editor, execute it, and keep the command, output,
-status and working directory together as one immutable block. Independent tabs
-provide separate local sessions without adding visual noise.
+## Current functionality
 
-## Prototype scope
+- independent tabs with persistent working directories and command history;
+- native PTY execution, 24-bit colour and a bundled VT renderer for TUI apps;
+- interactive input for prompts, password requests, REPLs and installers;
+- deterministic history, command, option and path completion followed by an
+  optional suggestion from a bundled 0.5B model;
+- projects with local or remote paths and optional startup commands;
+- native SSH transport with key, agent, password and keyboard-interactive
+  authentication, host-key verification, keepalive, RTT and reconnect;
+- remote path completion and Git context through a temporary helper removed at
+  disconnect;
+- SSH passwords and key passphrases stored in macOS Keychain; private keys stay
+  in their original files;
+- light, dark and system themes, configurable terminal font and size;
+- YAML configuration at `~/Library/Application Support/NTerm/config.yml`;
+- copying one block or a selection of commands and output.
 
-Included now:
+NTerm currently targets macOS 26 or newer on Apple silicon. Windows ConPTY, Linux native
+packaging and signed/notarized distribution are separate platform milestones.
 
-- native desktop window powered by Wails and the operating system WebView;
-- streamed command output grouped into blocks;
-- native PTY execution and a built-in VT renderer for `micro`, `nano`, `vim`,
-  pagers, process monitors and other alternate-screen applications;
-- persistent working directory for ordinary `cd` usage;
-- multiline command editor (`Shift+Enter` inserts a line, `Enter` runs it);
-- history, executable, completion-spec and filesystem suggestions;
-- cancellable AI completion through a bundled llama.cpp runtime;
-- independent local tabs with their own cwd, history and running process;
-- managed SSH sessions with persistent ControlMaster connections, port
-  forwarding and remote-aware paths, commands and Git context;
-- a temporary zero-configuration server helper that is removed on disconnect;
-- one-click copying of a complete command block (command and output);
-- system, light and dark themes;
-- configurable terminal font, size, shell and new-tab directory;
-- optional reduced transparency and command metadata;
-- cancellation with `Ctrl+C` and clearing with `Ctrl+L`.
+## Development
 
-Not in this milestone: the SSH host library, credentials and key storage. Their
-boundaries and rollout are documented in [docs/ROADMAP.md](docs/ROADMAP.md).
-
-Preferences are stored in the operating system configuration directory as
-`NTerm/settings.json`. The default directory and shell apply to newly created
-tabs; appearance settings apply immediately.
-
-## Run
-
-Prerequisites: Go 1.25+, Node 15+ and Wails 2.13+.
+Prerequisites: Go 1.25+ (the module selects the patched Go 1.26.5 toolchain) and
+the macOS command-line developer tools. Node and npm
+are not required because the frontend is dependency-free and committed as
+static assets.
 
 ```sh
-go install github.com/wailsapp/wails/v2/cmd/wails@v2.13.0
-wails dev
+go test -race ./...
+go run github.com/wailsapp/wails/v2/cmd/wails@v2.13.0 dev
 ```
 
-Build a self-contained production application:
+Build the self-contained application:
 
 ```sh
 ./scripts/build-macos.sh
 ```
 
-The frontend has no npm runtime dependencies. It is plain HTML, CSS and
-JavaScript embedded into the Go binary. The macOS build hooks also package the
-inference runtime and quantized model into `NTerm.app`; end users do not install
-Ollama, llama.cpp, Node, Go or any model separately.
+Run the full release gate with `./scripts/release-check.sh`. Distribution
+builds can set `NTERM_CODESIGN_IDENTITY` to a Developer ID Application identity;
+after configuring an `xcrun notarytool` Keychain profile, set
+`NTERM_NOTARY_PROFILE` and run `./scripts/notarize-macos.sh`.
 
-### Local AI completion
+The build downloads pinned, checksum-verified AI assets when they are not
+already present and packages them into `build/bin/NTerm.app`. End users do not
+need Go, Node, Ollama, llama.cpp or a separately installed model.
 
-Deterministic suggestions appear immediately and never wait for a model. After
-a short idle pause, NTerm asks its built-in Qwen coder model for one contextual
-completion using the cwd and six recent commands. The 0.5B Q4_K_M model uses a
-1024-token context, generates at most 64 tokens and unloads after 90 seconds of
-inactivity. The runtime starts lazily, binds only to a random loopback port and
-is terminated with NTerm.
-
-Optional developer configuration:
+Optional development overrides:
 
 - `NTERM_AI_RUNTIME` — path to a development `llama-server` binary;
 - `NTERM_AI_MODEL` — path to a development GGUF model.
 
-Both overrides must be set together. AI failures are silent and never delay or
-disable local suggestions. Suggestions are inserted into the editor and are
-never executed automatically. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
-for bundled component licenses.
-
-### SSH sessions
-
-Run an ordinary OpenSSH command such as `ssh user@host`. NTerm keeps that
-connection alive for the tab and runs subsequent blocks through multiplexed
-channels. OpenSSH options for identity files, jump hosts, config profiles and
-`-L`/`-R`/`-D` forwarding are preserved. Type `exit` or close the tab to return
-to the local session.
-
-NTerm copies a small POSIX helper to a private remote temporary directory. It
-provides remote path completion, command discovery and Git status, starts no
-daemon, changes no shell configuration and is deleted at disconnect. The
-current vertical slice uses the user's existing OpenSSH config, agent and keys;
-password/key storage UI comes with the host vault. Local and remote full-screen
-programs use the bundled VT renderer and return to the block list when they exit.
+Both values must be supplied together. The inference process is lazy,
+loopback-only, shared between tabs and stopped after 90 seconds of inactivity.
+Suggestions are inserted into the editor and never executed automatically.
 
 ## Keyboard shortcuts
 
 | Shortcut | Action |
 | --- | --- |
 | `Enter` | Run the command |
-| `Shift+Enter` | Insert a new line |
-| `Tab` / `→` | Accept the selected suggestion |
-| `Ctrl/Option+→` | Accept the next suggested word |
+| `Shift+Enter` | Insert a line |
+| `Tab` / `→` | Accept a suggestion |
+| `Option/Control+→` | Accept the next suggested word |
 | `↑` / `↓` | Navigate suggestions or command history |
-| `Ctrl+C` | Cancel the running block |
-| `Ctrl+L` | Clear visible blocks |
-| `Cmd/Ctrl+K` | Focus and select the command editor |
-| `Cmd/Ctrl+T` | Open a new tab |
-| `Cmd/Ctrl+W` | Close the active tab |
-| `Cmd/Ctrl+1…9` | Switch tabs |
-| `Cmd/Ctrl+,` | Open settings |
+| `Control+C` | Send interrupt to the running process |
+| `Control+L` | Clear blocks when no process is running |
+| `Command+K` | Focus and select the composer |
+| `Command+T` | Open a tab |
+| `Command+W` | Close the active tab |
+| `Command+1…9` | Switch tabs |
+| `Command+,` | Open settings |
 
-## Architecture
-
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for decisions, package
-boundaries, event flow and the production SSH/security design.
-
-The persistent visual rules live in [docs/STYLE_GUIDE.md](docs/STYLE_GUIDE.md).
->>>>>>> aa5b643 (Fixes)
+Architecture and security decisions are documented in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md); visual rules are in
+[docs/STYLE_GUIDE.md](docs/STYLE_GUIDE.md). Third-party components and licenses
+are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

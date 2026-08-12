@@ -22,18 +22,37 @@ import (
 
 var ErrBusy = errors.New("a command is already running in this session")
 
+const maxSessionHistory = 2000
+
 type Session struct {
-	mu        sync.RWMutex
-	cwd       string
-	localCWD  string
-	previous  string
-	shell     string
-	history   []string
-	running   bool
-	remote    *sshSession
-	activePTY *os.File
-	cols      uint16
-	rows      uint16
+	mu           sync.RWMutex
+	inputMu      sync.Mutex
+	cwd          string
+	localCWD     string
+	previous     string
+	shell        string
+	history      []string
+	running      bool
+	remote       *sshSession
+	activeInput  io.Writer
+	pendingInput []byte
+	acceptInput  bool
+	activeResize func(uint16, uint16) error
+	activeClose  func() error
+	cols         uint16
+	rows         uint16
+	sshProfile   SSHProfile
+	sshStatus    func(SSHStatus)
+}
+
+type SSHProfile struct {
+	CredentialAccount string
+	HelperEnabled     bool
+	Host              string
+	Port              int
+	User              string
+	KeyPath           string
+	ConfirmHostKey    func(SSHHostKey) bool
 }
 
 func NewSession() (*Session, error) {
@@ -66,7 +85,14 @@ func NewSessionAt(cwd, configuredShell string) (*Session, error) {
 	if shell == "" {
 		shell = "/bin/sh"
 	}
-	return &Session{cwd: filepath.Clean(cwd), localCWD: filepath.Clean(cwd), shell: shell, cols: 120, rows: 34}, nil
+	return &Session{
+		cwd:        filepath.Clean(cwd),
+		localCWD:   filepath.Clean(cwd),
+		shell:      shell,
+		cols:       120,
+		rows:       34,
+		sshProfile: SSHProfile{HelperEnabled: true},
+	}, nil
 }
 
 func (s *Session) CWD() string {
@@ -89,6 +115,67 @@ func (s *Session) Shell() string {
 	return s.shell
 }
 
+func (s *Session) ConfigureSSHProfile(profile SSHProfile) {
+	s.mu.Lock()
+	s.sshProfile = profile
+	s.mu.Unlock()
+}
+
+func (s *Session) SetSSHStatusHandler(handler func(SSHStatus)) {
+	s.mu.Lock()
+	s.sshStatus = handler
+	remote := s.remote
+	s.mu.Unlock()
+	if remote != nil {
+		remote.setStatusHandler(handler)
+	}
+}
+
+func (s *Session) emitSSHStatus(status SSHStatus) {
+	s.mu.RLock()
+	handler := s.sshStatus
+	s.mu.RUnlock()
+	if handler != nil {
+		handler(status)
+	}
+}
+
+func (s *Session) ConnectSSH(ctx context.Context, profile SSHProfile) error {
+	s.mu.Lock()
+	if s.running || s.remote != nil {
+		s.mu.Unlock()
+		return ErrBusy
+	}
+	s.running = true
+	handler := s.sshStatus
+	s.mu.Unlock()
+	if handler != nil {
+		handler(SSHStatus{State: "connecting", Label: profile.User + "@" + profile.Host, Message: "Connecting…"})
+	}
+	defer func() {
+		s.mu.Lock()
+		s.running = false
+		s.pendingInput = nil
+		s.mu.Unlock()
+	}()
+	connected, err := connectSSH(ctx, nil, "", profile)
+	if err != nil {
+		if handler != nil {
+			handler(SSHStatus{State: "disconnected", Label: profile.User + "@" + profile.Host, Message: err.Error()})
+		}
+		return err
+	}
+	connected.setStatusHandler(handler)
+	s.mu.Lock()
+	s.remote = connected
+	s.localCWD = s.cwd
+	s.cwd = connected.cwd
+	s.previous = ""
+	s.sshProfile = profile
+	s.mu.Unlock()
+	return nil
+}
+
 func (s *Session) Run(ctx context.Context, block *domain.Block, emit func(domain.OutputChunk)) error {
 	s.mu.Lock()
 	if s.running {
@@ -98,7 +185,11 @@ func (s *Session) Run(ctx context.Context, block *domain.Block, emit func(domain
 	s.running = true
 	cwd := s.cwd
 	remote := s.remote
+	sshProfile := s.sshProfile
 	s.history = append(s.history, block.Command)
+	if len(s.history) > maxSessionHistory {
+		s.history = append([]string(nil), s.history[len(s.history)-maxSessionHistory:]...)
+	}
 	s.mu.Unlock()
 
 	defer func() {
@@ -117,6 +208,7 @@ func (s *Session) Run(ctx context.Context, block *domain.Block, emit func(domain
 				s.cwd = s.localCWD
 			}
 			s.mu.Unlock()
+			s.emitSSHStatus(SSHStatus{State: "closed"})
 			block.FinalCWD = s.CWD()
 			emit(domain.OutputChunk{BlockID: block.ID, Stream: "stdout", Data: "SSH session disconnected\n"})
 			return nil
@@ -129,11 +221,14 @@ func (s *Session) Run(ctx context.Context, block *domain.Block, emit func(domain
 			emit(domain.OutputChunk{BlockID: block.ID, Stream: "stderr", Data: err.Error() + "\n"})
 			return exitError{code: 2}
 		}
-		connected, err := connectSSH(ctx, arguments, destination)
+		s.emitSSHStatus(SSHStatus{State: "connecting", Label: destination, Message: "Connecting…"})
+		connected, err := connectSSH(ctx, arguments, destination, sshProfile)
 		if err != nil {
+			s.emitSSHStatus(SSHStatus{State: "disconnected", Label: destination, Message: err.Error()})
 			emit(domain.OutputChunk{BlockID: block.ID, Stream: "stderr", Data: err.Error() + "\n"})
 			return exitError{code: 255}
 		}
+		connected.setStatusHandler(s.sshStatus)
 		s.mu.Lock()
 		s.remote = connected
 		s.localCWD = cwd
@@ -158,15 +253,30 @@ func (s *Session) Run(ctx context.Context, block *domain.Block, emit func(domain
 	return s.runShell(ctx, cwd, block, emit)
 }
 
+func (s *Session) ReconnectSSH(ctx context.Context) error {
+	s.mu.RLock()
+	remote := s.remote
+	s.mu.RUnlock()
+	if remote == nil {
+		return errors.New("ssh: no remote session")
+	}
+	return remote.reconnect(ctx, true)
+}
+
 // Close releases a managed SSH connection and its temporary helper.
 func (s *Session) Close() {
 	s.mu.Lock()
 	remote := s.remote
-	activePTY := s.activePTY
+	activeClose := s.activeClose
 	s.remote = nil
+	s.activeInput = nil
+	s.activeResize = nil
+	s.activeClose = nil
+	s.pendingInput = nil
+	s.acceptInput = false
 	s.mu.Unlock()
-	if activePTY != nil {
-		_ = activePTY.Close()
+	if activeClose != nil {
+		_ = activeClose()
 	}
 	if remote != nil {
 		remote.close(true)
@@ -177,13 +287,69 @@ func (s *Session) Close() {
 // rather than a command pipe, interprets control keys, escape sequences and
 // bracketed paste exactly like a native terminal.
 func (s *Session) Input(value string) error {
-	s.mu.RLock()
-	activePTY := s.activePTY
-	s.mu.RUnlock()
-	if activePTY == nil {
+	s.inputMu.Lock()
+	defer s.inputMu.Unlock()
+	s.mu.Lock()
+	activeInput := s.activeInput
+	remote := s.remote
+	if activeInput == nil {
+		if s.acceptInput {
+			s.pendingInput = append(s.pendingInput, value...)
+		}
+		s.mu.Unlock()
 		return nil
 	}
-	_, err := io.WriteString(activePTY, value)
+	s.mu.Unlock()
+	_, err := io.WriteString(activeInput, value)
+	if err == nil && remote != nil {
+		remote.touch()
+	}
+	return err
+}
+
+// BeginInput opens the short interval between creating a block in the UI and
+// attaching its PTY. Without it, a fast answer to a prompt could arrive before
+// the shell has published its input writer and would be lost.
+func (s *Session) BeginInput() {
+	s.inputMu.Lock()
+	defer s.inputMu.Unlock()
+	s.mu.Lock()
+	s.acceptInput = true
+	s.pendingInput = nil
+	s.mu.Unlock()
+}
+
+func (s *Session) EndInput() {
+	s.inputMu.Lock()
+	defer s.inputMu.Unlock()
+	s.mu.Lock()
+	s.acceptInput = false
+	s.pendingInput = nil
+	s.mu.Unlock()
+}
+
+// attachInput atomically publishes a PTY writer and flushes keys that arrived
+// after the block was created but before the process finished opening its PTY.
+// inputMu also preserves key order when Wails delivers several bridge calls at
+// nearly the same time.
+func (s *Session) attachInput(input io.Writer, resize func(uint16, uint16) error, closeInput func() error) error {
+	s.inputMu.Lock()
+	defer s.inputMu.Unlock()
+	s.mu.Lock()
+	s.activeInput = input
+	s.activeResize = resize
+	s.activeClose = closeInput
+	pending := append([]byte(nil), s.pendingInput...)
+	s.pendingInput = nil
+	remote := s.remote
+	s.mu.Unlock()
+	if len(pending) == 0 {
+		return nil
+	}
+	_, err := input.Write(pending)
+	if err == nil && remote != nil {
+		remote.touch()
+	}
 	return err
 }
 
@@ -193,12 +359,12 @@ func (s *Session) Resize(cols, rows uint16) error {
 	}
 	s.mu.Lock()
 	s.cols, s.rows = cols, rows
-	activePTY := s.activePTY
+	activeResize := s.activeResize
 	s.mu.Unlock()
-	if activePTY == nil {
+	if activeResize == nil {
 		return nil
 	}
-	return pty.Setsize(activePTY, &pty.Winsize{Cols: cols, Rows: rows})
+	return activeResize(cols, rows)
 }
 
 func (s *Session) RemoteLabel() string {
@@ -208,6 +374,15 @@ func (s *Session) RemoteLabel() string {
 		return ""
 	}
 	return s.remote.label()
+}
+
+func (s *Session) RemotePlatform() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.remote == nil {
+		return "server"
+	}
+	return s.remote.platform
 }
 
 func (s *Session) CompletePath(ctx context.Context, token string) ([]RemotePathEntry, bool) {
@@ -282,9 +457,14 @@ func (s *Session) runPTY(ctx context.Context, cmd *exec.Cmd, consume func([]byte
 	if err != nil {
 		return fmt.Errorf("start PTY: %w", err)
 	}
-	s.mu.Lock()
-	s.activePTY = terminal
-	s.mu.Unlock()
+	if err := s.attachInput(terminal, func(cols, rows uint16) error {
+		return pty.Setsize(terminal, &pty.Winsize{Cols: cols, Rows: rows})
+	}, terminal.Close); err != nil {
+		_ = terminal.Close()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return fmt.Errorf("write buffered terminal input: %w", err)
+	}
 
 	processDone := make(chan struct{})
 	go stopProcessOnCancel(ctx, cmd, processDone)
@@ -301,26 +481,12 @@ func (s *Session) runPTY(ctx context.Context, cmd *exec.Cmd, consume func([]byte
 	waitErr := cmd.Wait()
 	close(processDone)
 	s.mu.Lock()
-	if s.activePTY == terminal {
-		s.activePTY = nil
-	}
+	s.activeInput = nil
+	s.activeResize = nil
+	s.activeClose = nil
 	s.mu.Unlock()
 	_ = terminal.Close()
 	return waitErr
-}
-
-func copyOutput(group *sync.WaitGroup, reader io.Reader, blockID, stream string, emit func(domain.OutputChunk)) {
-	defer group.Done()
-	buffer := make([]byte, 4096)
-	for {
-		read, err := reader.Read(buffer)
-		if read > 0 {
-			emit(domain.OutputChunk{BlockID: blockID, Stream: stream, Data: string(buffer[:read])})
-		}
-		if err != nil {
-			return
-		}
-	}
 }
 
 func stopProcessOnCancel(ctx context.Context, cmd *exec.Cmd, done <-chan struct{}) {

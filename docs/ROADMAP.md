@@ -49,11 +49,12 @@ processes work correctly inside a block.
 
 ## Phase 2.5 — managed SSH vertical slice (complete)
 
-1. Detect an interactive OpenSSH invocation and retain one ControlMaster per tab.
-2. Preserve identity, jump-host and local/remote/dynamic forwarding options.
-3. Execute blocks through multiplexed channels with remote cwd persistence.
-4. Install a connection-scoped helper for remote paths, commands and Git data.
-5. Remove the helper and control socket on `exit`, tab closure and app shutdown.
+1. Detect an interactive SSH invocation and retain one native encrypted transport per tab.
+2. Authenticate with the configured key, agent or credential-vault password.
+3. Execute blocks through multiplexed SSH channels with remote cwd persistence.
+4. Detect dead and half-open links, report RTT and reconnect with bounded backoff.
+5. Install a connection-scoped helper for remote paths, commands and Git data.
+6. Remove the helper on `exit`, tab closure and app shutdown.
 
 Exit criterion: key/agent-authenticated servers have the normal NTerm block,
 completion and Git experience without a permanent server install.
@@ -63,6 +64,9 @@ completion and Git experience without a permanent server install.
 1. Restore window/tab layout after restart without resurrecting secrets.
 2. Search, pin, copy and rerun blocks; command palettes and split panes.
 3. Crash isolation and per-session resource limits.
+4. Opt-in tmux control-mode integration for reattaching an interrupted remote
+   TUI or long-running process; keep the current reconnect-only fallback when
+   tmux is unavailable.
 
 Exit criterion: a failed or noisy session cannot freeze other tabs.
 

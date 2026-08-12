@@ -28,10 +28,11 @@ const (
 )
 
 type PredictionContext struct {
-	Input   string
-	CWD     string
-	History []string
-	Model   string
+	Input      string
+	CWD        string
+	History    []string
+	Model      string
+	Candidates []string
 }
 
 type AIStatus struct {
@@ -43,6 +44,10 @@ type AIStatus struct {
 type predictionCacheEntry struct {
 	suggestion Suggestion
 	expiresAt  time.Time
+	model      string
+	cwd        string
+	input      string
+	history    string
 }
 
 // LocalModelProvider owns a bundled llama.cpp process. It is started lazily,
@@ -75,6 +80,9 @@ func (p *LocalModelProvider) Predict(ctx context.Context, value PredictionContex
 	if suggestion, ok := p.cached(key); ok {
 		return suggestion, nil
 	}
+	if suggestion, ok := p.cachedContinuation(value, model); ok {
+		return suggestion, nil
+	}
 	select {
 	case p.gate <- struct{}{}:
 		defer func() { <-p.gate }()
@@ -94,6 +102,9 @@ func (p *LocalModelProvider) Predict(ctx context.Context, value PredictionContex
 	prompt := "Examples:\nExact command prefix: git st\nResult: {\"command\":\"git status\"}\nExact command prefix: go te\nResult: {\"command\":\"go test ./...\"}\n\nWorking directory: " + value.CWD + "\n"
 	if history != "" {
 		prompt += "Recent commands, oldest first:\n" + history + "\n"
+	}
+	if candidates := safePredictionCandidates(value.Candidates, value.Input, 8); len(candidates) > 0 {
+		prompt += "Fast deterministic candidates, best first:\n- " + strings.Join(candidates, "\n- ") + "\n"
 	}
 	prompt += "Exact command prefix: " + value.Input
 	body, err := json.Marshal(map[string]any{
@@ -148,8 +159,11 @@ func (p *LocalModelProvider) Predict(ctx context.Context, value PredictionContex
 	if !validPrediction(value.Input, command) {
 		return Suggestion{}, fmt.Errorf("model returned an invalid completion %q", command)
 	}
+	if candidates := safePredictionCandidates(value.Candidates, value.Input, 8); len(candidates) > 0 && !predictionRefinesCandidate(command, candidates) {
+		return Suggestion{}, fmt.Errorf("model ignored deterministic completion candidates")
+	}
 	suggestion := Suggestion{Value: command, Label: command, Description: "built-in · 0.5B", Source: "ai"}
-	p.store(key, suggestion)
+	p.store(key, value, model, suggestion)
 	return suggestion, nil
 }
 
@@ -406,8 +420,37 @@ func validPrediction(prefix, command string) bool {
 	return !strings.ContainsAny(command, "\r\n\x00")
 }
 
+func safePredictionCandidates(candidates []string, prefix string, limit int) []string {
+	result := make([]string, 0, min(len(candidates), limit))
+	seen := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(candidate, "\n", " "), "\r", " "))
+		if candidate == "" || candidate == prefix || len(candidate) > 500 || !strings.HasPrefix(candidate, prefix) {
+			continue
+		}
+		if _, exists := seen[candidate]; exists {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		result = append(result, candidate)
+		if len(result) == limit {
+			break
+		}
+	}
+	return result
+}
+
+func predictionRefinesCandidate(command string, candidates []string) bool {
+	for _, candidate := range candidates {
+		if command == candidate || strings.HasPrefix(command, candidate+" ") {
+			return true
+		}
+	}
+	return false
+}
+
 func predictionCacheKey(value PredictionContext, model string) string {
-	return model + "\x00" + value.CWD + "\x00" + value.Input + "\x00" + recentHistory(value.History, 3)
+	return model + "\x00" + value.CWD + "\x00" + value.Input + "\x00" + recentHistory(value.History, 3) + "\x00" + strings.Join(safePredictionCandidates(value.Candidates, value.Input, 8), "\x1f")
 }
 
 func (p *LocalModelProvider) cached(key string) (Suggestion, bool) {
@@ -421,7 +464,33 @@ func (p *LocalModelProvider) cached(key string) (Suggestion, bool) {
 	return entry.suggestion, true
 }
 
-func (p *LocalModelProvider) store(key string, suggestion Suggestion) {
+func (p *LocalModelProvider) cachedContinuation(value PredictionContext, model string) (Suggestion, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	history := recentHistory(value.History, 3)
+	bestInputLength := -1
+	var best Suggestion
+	for key, entry := range p.cache {
+		if now.After(entry.expiresAt) {
+			delete(p.cache, key)
+			continue
+		}
+		if entry.model != model || entry.cwd != value.CWD || entry.history != history {
+			continue
+		}
+		if !strings.HasPrefix(value.Input, entry.input) || !strings.HasPrefix(entry.suggestion.Value, value.Input) {
+			continue
+		}
+		if len(entry.input) > bestInputLength {
+			bestInputLength = len(entry.input)
+			best = entry.suggestion
+		}
+	}
+	return best, bestInputLength >= 0
+}
+
+func (p *LocalModelProvider) store(key string, value PredictionContext, model string, suggestion Suggestion) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if len(p.cache) >= 96 {
@@ -431,5 +500,8 @@ func (p *LocalModelProvider) store(key string, suggestion Suggestion) {
 			}
 		}
 	}
-	p.cache[key] = predictionCacheEntry{suggestion: suggestion, expiresAt: time.Now().Add(10 * time.Minute)}
+	p.cache[key] = predictionCacheEntry{
+		suggestion: suggestion, expiresAt: time.Now().Add(10 * time.Minute),
+		model: model, cwd: value.CWD, input: value.Input, history: recentHistory(value.History, 3),
+	}
 }

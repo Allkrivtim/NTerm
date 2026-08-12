@@ -10,11 +10,24 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/alexandr/nterm/internal/terminal"
 )
 
 type fakeContext struct {
 	cwd     string
 	history []string
+}
+
+type fakeRemoteContext struct {
+	fakeContext
+	pathCalls int
+	entries   []terminal.RemotePathEntry
+}
+
+func (f *fakeRemoteContext) CompletePath(_ context.Context, _ string) ([]terminal.RemotePathEntry, bool) {
+	f.pathCalls++
+	return append([]terminal.RemotePathEntry(nil), f.entries...), true
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -60,6 +73,41 @@ func TestSuggestCompletesFilesRelativeToCWD(t *testing.T) {
 	}
 	if items[0].Value != "cat node_modules/" || items[1].Value != "cat notes.txt" {
 		t.Fatalf("unexpected suggestions: %#v", items)
+	}
+}
+
+func TestSuggestEscapesAndQuotesPathsWithSpaces(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(directory, "My File.txt"), []byte("test"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{session: fakeContext{cwd: directory}}
+	unquoted := service.Suggest(context.Background(), "cat My", 8)
+	if len(unquoted) != 1 || unquoted[0].Value != `cat My\ File.txt` {
+		t.Fatalf("unquoted suggestions = %#v", unquoted)
+	}
+	quoted := service.Suggest(context.Background(), `cat "My`, 8)
+	if len(quoted) != 1 || quoted[0].Value != `cat "My File.txt"` {
+		t.Fatalf("quoted suggestions = %#v", quoted)
+	}
+}
+
+func TestSuggestCachesRemoteDirectoryAcrossKeystrokes(t *testing.T) {
+	remote := &fakeRemoteContext{
+		fakeContext: fakeContext{cwd: "/srv/project"},
+		entries: []terminal.RemotePathEntry{
+			{Value: "src/api", IsDir: true},
+			{Value: "src/app.go"},
+		},
+	}
+	service := &Service{session: remote}
+	first := service.Suggest(context.Background(), "cat src/a", 8)
+	second := service.Suggest(context.Background(), "cat src/ap", 8)
+	if remote.pathCalls != 1 {
+		t.Fatalf("remote directory calls = %d, want 1", remote.pathCalls)
+	}
+	if len(first) != 2 || len(second) != 2 || second[0].Value != "cat src/api/" {
+		t.Fatalf("cached suggestions = %#v then %#v", first, second)
 	}
 }
 
@@ -112,6 +160,52 @@ func TestLocalModelPredictionUsesSmallResourceBudgetAndCaches(t *testing.T) {
 	}
 	if requests != 1 {
 		t.Fatalf("requests = %d, want cached single request", requests)
+	}
+}
+
+func TestLocalModelReusesCompletionWhilePrefixGrows(t *testing.T) {
+	requests := 0
+	provider := mockProvider(func(*http.Request) string {
+		requests++
+		return `{"choices":[{"message":{"content":"{\"command\":\"git status --short\"}"}}]}`
+	})
+	contextValue := PredictionContext{Input: "git st", CWD: "/tmp", History: []string{"git diff"}}
+	first, err := provider.Predict(context.Background(), contextValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contextValue.Input = "git sta"
+	second, err := provider.Predict(context.Background(), contextValue)
+	if err != nil || second.Value != first.Value || requests != 1 {
+		t.Fatalf("continued prediction = %#v, err=%v, requests=%d", second, err, requests)
+	}
+}
+
+func TestLocalModelRefinesFilesystemCandidates(t *testing.T) {
+	var requestBody []byte
+	provider := mockProvider(func(request *http.Request) string {
+		requestBody, _ = io.ReadAll(request.Body)
+		return `{"choices":[{"message":{"content":"{\"command\":\"cat /tmp/alpha.txt\"}"}}]}`
+	})
+	got, err := provider.Predict(context.Background(), PredictionContext{
+		Input: "cat /tmp/a", CWD: "/tmp",
+		Candidates: []string{"cat /tmp/alpha.txt", "cat /tmp/archive/"},
+	})
+	if err != nil || got.Value != "cat /tmp/alpha.txt" {
+		t.Fatalf("filesystem prediction = %#v, %v", got, err)
+	}
+	if !strings.Contains(string(requestBody), "Fast deterministic candidates") || !strings.Contains(string(requestBody), "cat /tmp/archive/") {
+		t.Fatalf("filesystem candidates missing from prompt: %s", requestBody)
+	}
+
+	inventingProvider := mockProvider(func(*http.Request) string {
+		return `{"choices":[{"message":{"content":"{\"command\":\"cat /tmp/absent.txt\"}"}}]}`
+	})
+	_, err = inventingProvider.Predict(context.Background(), PredictionContext{
+		Input: "cat /tmp/a", CWD: "/tmp", Candidates: []string{"cat /tmp/alpha.txt"},
+	})
+	if err == nil {
+		t.Fatal("model must not invent a path outside deterministic candidates")
 	}
 }
 

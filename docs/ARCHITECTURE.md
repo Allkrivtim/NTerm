@@ -10,7 +10,7 @@ Workspace
           └── Composer (editable command draft + suggestions)
 ```
 
-The prototype instantiates one workspace with multiple local or SSH tabs. Every tab
+The application instantiates one workspace with multiple local or SSH tabs. Every tab
 owns an independent session, cwd, history, completion context and running
 process. Appearance settings belong to the workspace; the configured default
 directory and shell are used when a new tab is created.
@@ -19,7 +19,7 @@ directory and shell are used when a new tab is created.
 
 ### ADR-001: Go core with Wails v2 shell
 
-Status: accepted for the prototype.
+Status: accepted.
 
 Wails uses the platform WebView rather than shipping a Chromium runtime. This
 gives NTerm a native window, small distribution size and a DOM editor capable of
@@ -67,19 +67,27 @@ deterministic result. NTerm owns a bundled llama.cpp sidecar and 0.5B quantized
 model: it starts lazily, binds to loopback only, serializes inference across
 tabs, unloads after 90 idle seconds and terminates with the application.
 
-### ADR-005: secrets never enter the application database
+### ADR-005: secrets never enter the YAML configuration
 
-Host metadata and secret references live in SQLite. Passwords and passphrases
-live in the operating system credential vault. Private keys normally remain on
-disk with their existing permissions. Clipboard operations involving secrets
-are explicit, time-limited and never logged.
+Host metadata and a boolean credential reference live in `config.yml`.
+Passwords and passphrases live in macOS Keychain. Private keys remain on disk,
+must be regular files and are rejected when group or other permission bits are
+set. Secrets are never returned to the renderer or written to application logs.
 
-### ADR-006: SSH enhancement is temporary and connection-scoped
+### ADR-006: SSH is a managed transport, not a local shell mode
 
-An interactive `ssh host` command starts the platform OpenSSH client as a
-persistent ControlMaster. Each NTerm block uses a separate multiplexed channel,
-so one authenticated transport supports streamed commands and `-L`/`-R`/`-D`
-forwarding without an application-specific SSH dependency.
+NTerm uses the Go SSH protocol implementation directly. A tab owns one
+authenticated SSH transport and opens a separate protocol channel for each
+block. Transport state is therefore independent from command state: the UI can
+show latency and connection health, detect an orderly close immediately, probe
+half-open links with encrypted keepalive requests and reconnect without
+replacing the tab.
+
+Reconnect uses bounded exponential backoff and restores the last valid remote
+working directory. A command whose channel was interrupted is never replayed
+automatically because doing so could duplicate a destructive or non-idempotent
+operation. TCP keepalive is only a secondary dead-peer detector; SSH-level
+keepalive is the source of the user-visible connection state.
 
 After connection, NTerm uploads a small POSIX helper to a mode-0700 temporary
 directory. It performs bounded remote path completion, command discovery and
@@ -96,7 +104,8 @@ flowchart LR
     Runner --> Shell["Shell process"]
     Runner --> PTY["Unix PTY"]
     PTY --> VT["Bundled xterm.js VT renderer"]
-    Session --> SSH["OpenSSH ControlMaster"]
+    Session --> SSH["Native SSH transport"]
+    SSH --> Health["Keepalive, RTT and reconnect"]
     SSH --> Helper["Temporary remote helper"]
     Runner -->|output and completion events| Bridge
     Bridge --> UI
@@ -120,7 +129,7 @@ frontend/dist          Dependency-free editor and block renderer
 scripts                Reproducible self-contained macOS packaging
 ```
 
-Future packages:
+Potential future packages:
 
 ```text
 internal/pty           Future Windows ConPTY adapter and platform abstraction
@@ -176,13 +185,13 @@ segments and indexed separately from metadata.
 
 - The renderer cannot spawn processes or read arbitrary files directly.
 - Go validates empty commands and serializes session execution.
-- Model completion is disabled by default and loopback-only when enabled.
+- Model completion is enabled by default, loopback-only and can be disabled in Settings.
 - Environment snapshots, command output and prompts may contain secrets; logs
   must redact them and telemetry must remain opt-in.
 - SSH host keys require explicit policy; `InsecureIgnoreHostKey` is forbidden.
 - Database encryption is not a substitute for an OS credential store.
 
-## Known prototype limitations
+## Known product limitations
 
 - Unix uses a PTY; Windows still needs its ConPTY implementation.
 - ANSI support in the renderer covers common SGR colors, not the complete VT
@@ -191,3 +200,7 @@ segments and indexed separately from metadata.
   command; an explicit `exit` command may prevent the update.
 - Completion currently assumes the caret is at the end of the draft. The next
   editor iteration passes caret/token ranges to providers.
+- Reconnecting the transport does not preserve a foreground remote process.
+  Seamless recovery of a running TUI requires a remote session multiplexer
+  such as tmux (or a state-synchronizing protocol such as Mosh); NTerm does not
+  pretend that replaying an interrupted command is equivalent.

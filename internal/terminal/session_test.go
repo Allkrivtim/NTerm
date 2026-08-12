@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"bytes"
 	"context"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,25 @@ import (
 
 	"github.com/alexandr/nterm/internal/domain"
 )
+
+func TestInputQueuedUntilPTYIsReady(t *testing.T) {
+	session, err := NewSessionAt(t.TempDir(), "/bin/sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	session.BeginInput()
+	if err := session.Input("yes\r"); err != nil {
+		t.Fatal(err)
+	}
+	var input bytes.Buffer
+	if err := session.attachInput(&input, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := input.String(); got != "yes\r" {
+		t.Fatalf("buffered input = %q", got)
+	}
+	session.EndInput()
+}
 
 func TestSessionStreamsOutputAndExitCode(t *testing.T) {
 	session, err := NewSession()
@@ -51,6 +71,34 @@ func TestSessionProvidesTTYAndWindowSize(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "tty-device") || !strings.Contains(output.String(), "27 91") {
 		t.Fatalf("PTY size output = %q", output.String())
+	}
+}
+
+func TestLinePromptAcceptsRawInputWithoutFullscreenMode(t *testing.T) {
+	session, err := NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	block := &domain.Block{ID: "prompt", Command: `printf 'Continue? '; IFS= read answer; printf '\nanswer=%s\n' "$answer"`, StartedAt: time.Now()}
+	var output strings.Builder
+	var answered sync.Once
+	err = session.Run(ctx, block, func(chunk domain.OutputChunk) {
+		output.WriteString(chunk.Data)
+		if strings.Contains(output.String(), "Continue?") {
+			answered.Do(func() {
+				if inputErr := session.Input("Y\r"); inputErr != nil {
+					t.Errorf("send prompt answer: %v", inputErr)
+				}
+			})
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "answer=Y") {
+		t.Fatalf("prompt output = %q", output.String())
 	}
 }
 
@@ -193,7 +241,7 @@ func TestSessionConfiguresColoredListings(t *testing.T) {
 		t.Fatal(err)
 	}
 	block := &domain.Block{
-		ID: "colors", Command: `printf '%s|%s|%s' "$CLICOLOR_FORCE" "$LSCOLORS" "$LS_COLORS"`,
+		ID: "colors", Command: `printf '%s|%s|%s|%s|%s' "$TERM" "$COLORTERM" "$CLICOLOR_FORCE" "$LSCOLORS" "$LS_COLORS"`,
 		StartedAt: time.Now(),
 	}
 	var output strings.Builder
@@ -201,7 +249,7 @@ func TestSessionConfiguresColoredListings(t *testing.T) {
 		t.Fatal(err)
 	}
 	value := output.String()
-	if !strings.HasPrefix(value, "1|GxFxCxDxBxegedabagaced|") || !strings.Contains(value, "*.zip=33") {
+	if !strings.HasPrefix(value, "xterm-256color|truecolor|1|GxFxCxDxBxegedabagaced|") || !strings.Contains(value, "*.zip=33") {
 		t.Fatalf("listing colors are not configured: %q", value)
 	}
 }

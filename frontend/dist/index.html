@@ -11,6 +11,9 @@
   <body>
     <div class="app-shell">
       <nav class="tabbar" aria-label="Terminal tabs">
+        <button class="quiet-button home-button" id="home-button" aria-label="Home" title="Home">
+          <svg aria-hidden="true" viewBox="0 0 20 20"><path d="m4 9 6-5 6 5v7H4zM8 16v-4h4v4"/></svg>
+        </button>
         <div class="tab-list" id="tab-list" role="tablist"></div>
         <button class="quiet-button" id="new-tab-button" aria-label="New tab" title="New tab (⌘T)">
           <svg aria-hidden="true" viewBox="0 0 20 20"><path d="M10 4v12M4 10h12"/></svg>
@@ -20,6 +23,48 @@
           <svg aria-hidden="true" viewBox="0 0 20 20"><path d="M4 5h12M4 10h12M4 15h12M7 3v4M13 8v4M8 13v4"/></svg>
         </button>
       </nav>
+
+      <section class="home-screen" id="home-screen" aria-label="Home" hidden>
+        <header class="home-header">
+          <h1 id="home-greeting">Your workspace is ready.</h1>
+          <label class="home-search">
+            <svg aria-hidden="true" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg>
+            <input id="home-search" type="search" placeholder="Find a project or server" autocomplete="off" spellcheck="false">
+            <kbd>⌘F</kbd>
+          </label>
+        </header>
+        <div class="home-notice" id="home-notice" role="status" hidden></div>
+
+        <div class="home-grid">
+        <section class="home-section" aria-labelledby="projects-title">
+          <div class="home-section-heading">
+            <div><h2 id="projects-title">Projects</h2><span id="projects-count"></span></div>
+            <button class="home-add" id="add-project" type="button">
+              <svg aria-hidden="true" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></svg>
+              Add project
+            </button>
+          </div>
+          <div class="resource-groups" id="project-groups"></div>
+          <div class="home-empty" id="projects-empty" hidden>
+            <span>No projects yet</span><button type="button" data-create="project">Add a folder</button>
+          </div>
+        </section>
+
+        <section class="home-section" aria-labelledby="servers-title">
+          <div class="home-section-heading">
+            <div><h2 id="servers-title">SSH servers</h2><span id="servers-count"></span></div>
+            <button class="home-add" id="add-server" type="button">
+              <svg aria-hidden="true" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></svg>
+              Add server
+            </button>
+          </div>
+          <div class="resource-groups" id="server-groups"></div>
+          <div class="home-empty" id="servers-empty" hidden>
+            <span>No servers yet</span><button type="button" data-create="server">Add a connection</button>
+          </div>
+        </section>
+        </div>
+      </section>
 
       <main class="terminal" id="terminal">
         <section class="blocks" id="blocks" aria-live="polite"></section>
@@ -31,6 +76,14 @@
       </section>
 
       <section class="composer-zone">
+        <div class="selection-toolbar" id="selection-toolbar" hidden>
+          <span id="selection-count">0 blocks</span>
+          <button class="selection-action" id="copy-selected-commands" type="button">Copy commands</button>
+          <button class="selection-action selection-action-primary" id="copy-selected-blocks" type="button">Copy blocks</button>
+          <button class="selection-clear" id="clear-block-selection" type="button" aria-label="Clear selection" title="Clear selection">
+            <svg aria-hidden="true" viewBox="0 0 16 16"><path d="m4 4 8 8M12 4l-8 8"/></svg>
+          </button>
+        </div>
         <div class="composer" id="composer">
           <div class="editor-wrap">
             <pre class="syntax-highlight" id="syntax-highlight" aria-hidden="true"></pre>
@@ -49,6 +102,12 @@
           </div>
           <div class="composer-context">
             <span class="cwd" id="cwd" title="Current directory">Loading…</span>
+            <span class="context-separator" id="ssh-separator" aria-hidden="true" hidden></span>
+            <button class="ssh-health" id="ssh-health" type="button" hidden>
+              <span class="ssh-health-dot" aria-hidden="true"></span>
+              <span id="ssh-health-label">SSH</span>
+              <span class="ssh-health-latency" id="ssh-health-latency"></span>
+            </button>
             <span class="context-separator" id="git-separator" aria-hidden="true" hidden></span>
             <span class="git-context" id="git-context" hidden>
               <svg class="git-icon" aria-hidden="true" viewBox="0 0 16 16">
@@ -67,14 +126,14 @@
     </div>
 
     <div class="settings-layer" id="settings-layer" hidden>
-      <button class="settings-backdrop" id="settings-backdrop" aria-label="Close settings"></button>
-      <section class="settings-panel" id="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+      <button class="settings-backdrop" id="settings-backdrop" type="button" aria-label="Close settings"></button>
+      <section class="settings-panel" id="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title" tabindex="-1">
         <header class="settings-header">
           <div>
             <h1 id="settings-title">Settings</h1>
             <p>Changes apply to this device.</p>
           </div>
-          <button class="quiet-button" id="settings-close" aria-label="Close settings">
+          <button class="quiet-button" id="settings-close" type="button" aria-label="Close settings">
             <svg aria-hidden="true" viewBox="0 0 20 20"><path d="m5 5 10 10M15 5 5 15"/></svg>
           </button>
         </header>
@@ -133,6 +192,10 @@
           <fieldset class="settings-group">
             <legend>Interface</legend>
             <label class="settings-row">
+              <span><strong>Open Home on launch</strong><small>Start with projects and servers</small></span>
+              <input class="switch" id="open-home-on-launch" name="openHomeOnLaunch" type="checkbox">
+            </label>
+            <label class="settings-row">
               <span><strong>Reduce transparency</strong><small>Use solid functional surfaces</small></span>
               <input class="switch" id="reduce-transparency" name="reduceTransparency" type="checkbox">
             </label>
@@ -142,11 +205,98 @@
             </label>
           </fieldset>
 
+          <fieldset class="settings-group">
+            <legend>Projects &amp; SSH</legend>
+            <label class="settings-row">
+              <span><strong>Run project commands</strong><small>Execute configured startup commands after opening</small></span>
+              <input class="switch" id="run-project-commands" name="runProjectCommands" type="checkbox">
+            </label>
+            <label class="settings-row">
+              <span><strong>SSH workspace helper</strong><small>Temporary completion and Git helper; removed on disconnect</small></span>
+              <input class="switch" id="ssh-helper-enabled" name="sshHelperEnabled" type="checkbox">
+            </label>
+            <div class="settings-row settings-row-stack config-file-row">
+              <span><strong>Configuration file</strong><small>GUI changes are written to this YAML file</small></span>
+              <div class="config-file-actions">
+                <input class="text-input" id="config-path" type="text" readonly>
+                <button class="text-button" id="reload-config" type="button">Reload</button>
+              </div>
+            </div>
+          </fieldset>
+
+          <fieldset class="settings-group">
+            <legend>Home greeting</legend>
+            <p class="settings-note">One line is chosen at random for the current part of your local day.</p>
+            <div class="greeting-grid">
+              <label><span>Morning</span><textarea class="settings-textarea" id="morning-greetings" rows="4"></textarea></label>
+              <label><span>Day</span><textarea class="settings-textarea" id="day-greetings" rows="4"></textarea></label>
+              <label><span>Evening</span><textarea class="settings-textarea" id="evening-greetings" rows="4"></textarea></label>
+              <label><span>Night</span><textarea class="settings-textarea" id="night-greetings" rows="4"></textarea></label>
+            </div>
+          </fieldset>
+
           <div class="settings-error" id="settings-error" role="alert" hidden></div>
           <footer class="settings-footer">
             <button class="text-button" id="settings-reset" type="button">Reset</button>
             <button class="done-button" type="submit">Done</button>
           </footer>
+        </form>
+      </section>
+    </div>
+
+    <div class="resource-editor-layer" id="resource-editor-layer" tabindex="-1" hidden>
+      <button class="resource-editor-backdrop" id="resource-editor-backdrop" type="button" aria-label="Close editor"></button>
+      <section class="resource-editor" role="dialog" aria-modal="true" aria-labelledby="resource-editor-title">
+        <header class="resource-editor-header">
+          <div><p id="resource-editor-kind"></p><h2 id="resource-editor-title">New project</h2></div>
+          <button class="quiet-button" id="resource-editor-close" type="button" aria-label="Close editor">
+            <svg aria-hidden="true" viewBox="0 0 20 20"><path d="m5 5 10 10M15 5 5 15"/></svg>
+          </button>
+        </header>
+
+        <form id="project-form" class="resource-form" hidden>
+          <input id="project-id" type="hidden">
+          <label><span>Name</span><input class="text-input" id="project-name" required autocomplete="off"></label>
+          <label><span>Folder group</span><input class="text-input" id="project-group" autocomplete="off" placeholder="Personal"></label>
+          <div class="resource-form-columns">
+            <label><span>Icon</span><select id="project-icon">
+              <option value="code">Code</option>
+              <option value="go">Go</option>
+              <option value="python">Python</option>
+              <option value="docker">Docker</option>
+              <option value="node">Node.js</option>
+              <option value="rust">Rust</option>
+              <option value="web">Web</option>
+              <option value="database">Database</option>
+              <option value="mobile">Mobile</option>
+              <option value="bot">Bot</option>
+            </select></label>
+            <label><span>Custom icon path <small>optional</small></span><input class="text-input" id="project-icon-path" autocomplete="off" spellcheck="false" placeholder="~/icon.svg"></label>
+          </div>
+          <label><span>Location</span><select id="project-server"><option value="">This Mac</option></select></label>
+          <label><span>Path</span><input class="text-input" id="project-path" required autocomplete="off" spellcheck="false" placeholder="~/Projects/my-app"></label>
+          <label><span>Startup command</span><textarea class="resource-command" id="project-command" rows="3" spellcheck="false" placeholder="npm run dev"></textarea></label>
+          <div class="resource-form-error" id="project-form-error" hidden></div>
+          <footer><button class="danger-button" id="delete-project" type="button" hidden>Delete</button><span></span><button class="text-button" data-close-editor type="button">Cancel</button><button class="done-button" type="submit">Save</button></footer>
+        </form>
+
+        <form id="server-form" class="resource-form" hidden>
+          <input id="server-id" type="hidden">
+          <div class="resource-form-columns">
+            <label><span>Name</span><input class="text-input" id="server-name" required autocomplete="off"></label>
+            <label><span>Folder group</span><input class="text-input" id="server-group" autocomplete="off" placeholder="Production"></label>
+          </div>
+          <div class="resource-form-columns resource-form-host">
+            <label><span>Host / IP</span><input class="text-input" id="server-host" required autocomplete="off" spellcheck="false"></label>
+            <label><span>Port</span><input class="number-input" id="server-port" type="number" min="1" max="65535" value="22"></label>
+          </div>
+          <label><span>User</span><input class="text-input" id="server-user" required autocomplete="off" spellcheck="false"></label>
+          <label><span>Private key <small>optional</small></span><input class="text-input" id="server-key" autocomplete="off" spellcheck="false" placeholder="~/.ssh/id_ed25519"></label>
+          <label><span>Password / key passphrase <small id="server-password-state">optional · stored in Keychain</small></span><input class="text-input" id="server-password" type="password" autocomplete="new-password" placeholder="Leave empty to keep current"></label>
+          <label class="clear-secret" id="clear-password-row" hidden><input id="clear-password" type="checkbox"> Remove saved password</label>
+          <label><span>Command after login</span><textarea class="resource-command" id="server-command" rows="3" spellcheck="false" placeholder="tmux attach || tmux"></textarea></label>
+          <div class="resource-form-error" id="server-form-error" hidden></div>
+          <footer><button class="danger-button" id="delete-server" type="button" hidden>Delete</button><span></span><button class="text-button" data-close-editor type="button">Cancel</button><button class="done-button" type="submit">Save</button></footer>
         </form>
       </section>
     </div>
