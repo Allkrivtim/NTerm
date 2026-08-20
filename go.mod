@@ -2,10 +2,11 @@ module github.com/alexandr/nterm
 
 go 1.25.0
 
-toolchain go1.26.5
+toolchain go1.26.6
 
 require (
 	github.com/creack/pty v1.1.24
+	github.com/mattn/go-sqlite3 v1.14.32
 	github.com/wailsapp/wails/v2 v2.13.0
 	golang.org/x/crypto v0.52.0
 	gopkg.in/yaml.v3 v3.0.1

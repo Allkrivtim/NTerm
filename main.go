@@ -3,8 +3,11 @@ package main
 import (
 	"embed"
 	"log"
+	"os"
 
 	"github.com/wailsapp/wails/v2"
+	"github.com/wailsapp/wails/v2/pkg/menu"
+	"github.com/wailsapp/wails/v2/pkg/menu/keys"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 	"github.com/wailsapp/wails/v2/pkg/options/mac"
@@ -14,10 +17,26 @@ import (
 var assets embed.FS
 
 func main() {
-	app, err := NewApp()
+	var app *App
+	var err error
+	if isNewWindowProcess(os.Args[1:]) {
+		app, err = NewWindowApp()
+	} else {
+		app, err = NewApp()
+	}
 	if err != nil {
 		log.Fatal(err)
 	}
+	applicationMenu := menu.NewMenu()
+	applicationMenu.Append(menu.AppMenu())
+	fileMenu := applicationMenu.AddSubmenu("File")
+	fileMenu.AddText("New Window", keys.CmdOrCtrl("n"), func(*menu.CallbackData) {
+		if err := app.NewWindow(); err != nil {
+			log.Printf("new window: %v", err)
+		}
+	})
+	applicationMenu.Append(menu.EditMenu())
+	applicationMenu.Append(menu.WindowMenu())
 	err = wails.Run(&options.App{
 		Title:            "NTerm",
 		Width:            1120,
@@ -29,6 +48,7 @@ func main() {
 		Frameless:        false,
 		BackgroundColour: &options.RGBA{R: 20, G: 20, B: 21, A: 0},
 		AssetServer:      &assetserver.Options{Assets: assets},
+		Menu:             applicationMenu,
 		Mac: &mac.Options{
 			TitleBar:             mac.TitleBarHidden(),
 			Appearance:           mac.DefaultAppearance,

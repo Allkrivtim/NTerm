@@ -126,7 +126,7 @@ func TestRemoteOutputFilterStreamsAndRemovesMetadata(t *testing.T) {
 		blockID: "block-1",
 		status:  -1,
 		emit: func(chunk domain.OutputChunk) {
-			output.WriteString(chunk.Data)
+			output.Write(chunk.Bytes())
 		},
 	}
 	for _, part := range []string{"hello\n\x1eNTER", "M_META\x1f7\x1f/tmp/project\x1e\n"} {

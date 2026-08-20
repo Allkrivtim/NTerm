@@ -31,6 +31,10 @@ placement over decorative personality.
 - Control height: 28–44 px depending on text editing needs.
 - Separators: 1 px at low contrast.
 - Terminal text: 10–24 px configurable, 13 px default.
+- Terminal line height is configurable from 1.2–2.0; block rhythm offers
+  compact, comfortable and spacious presets without changing content order.
+- Cursor shape and blinking apply to the interactive VT surface. Shell syntax
+  colours and command timestamps are optional presentation layers.
 - Shell syntax follows macOS semantic color families: blue for commands,
   purple for options, teal for paths, warm orange for quoted text, cyan for
   variables and muted pink for operators. Light and dark themes use separate

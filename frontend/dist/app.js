@@ -20,6 +20,10 @@
     tuiShell: document.getElementById("tui-shell"),
     tuiTerminal: document.getElementById("tui-terminal"),
     blocks: document.getElementById("blocks"),
+    blockSearch: document.getElementById("block-search"),
+    blockSearchInput: document.getElementById("block-search-input"),
+    blockSearchCount: document.getElementById("block-search-count"),
+    blockSearchClose: document.getElementById("block-search-close"),
     editor: document.getElementById("command-editor"),
     syntax: document.getElementById("syntax-highlight"),
     ghost: document.getElementById("ghost"),
@@ -31,6 +35,9 @@
     clearBlockSelection: document.getElementById("clear-block-selection"),
     suggestions: document.getElementById("suggestions"),
     cwd: document.getElementById("cwd"),
+    environmentSeparator: document.getElementById("environment-separator"),
+    environmentContext: document.getElementById("environment-context"),
+    environmentLabel: document.getElementById("environment-label"),
     sshSeparator: document.getElementById("ssh-separator"),
     sshHealth: document.getElementById("ssh-health"),
     sshHealthLabel: document.getElementById("ssh-health-label"),
@@ -53,6 +60,11 @@
     settingsError: document.getElementById("settings-error"),
     fontFamily: document.getElementById("font-family"),
     fontSize: document.getElementById("font-size"),
+    terminalLineHeight: document.getElementById("terminal-line-height"),
+    blockDensity: document.getElementById("block-density"),
+    cursorStyle: document.getElementById("cursor-style"),
+    cursorBlink: document.getElementById("cursor-blink"),
+    shellSyntaxHighlighting: document.getElementById("shell-syntax-highlighting"),
     defaultPath: document.getElementById("default-path"),
     shellPath: document.getElementById("shell-path"),
     aiEnabled: document.getElementById("ai-enabled"),
@@ -60,9 +72,11 @@
     aiStatusMessage: document.getElementById("ai-status-message"),
     reduceTransparency: document.getElementById("reduce-transparency"),
     showBlockMetadata: document.getElementById("show-block-metadata"),
+    showBlockTimestamps: document.getElementById("show-block-timestamps"),
     openHomeOnLaunch: document.getElementById("open-home-on-launch"),
     runProjectCommands: document.getElementById("run-project-commands"),
     sshHelperEnabled: document.getElementById("ssh-helper-enabled"),
+    exportSSHConfig: document.getElementById("export-ssh-config"),
     configPath: document.getElementById("config-path"),
     reloadConfig: document.getElementById("reload-config"),
     morningGreetings: document.getElementById("morning-greetings"),
@@ -106,10 +120,16 @@
     theme: "system",
     fontFamily: "SF Mono",
     fontSize: 13,
+    terminalLineHeight: 1.3,
+    blockDensity: "comfortable",
+    cursorStyle: "block",
+    cursorBlink: true,
+    shellSyntaxHighlighting: true,
     defaultPath: "~",
     shell: "",
     reduceTransparency: false,
     showBlockMetadata: true,
+    showBlockTimestamps: false,
     aiEnabled: true,
     aiModel: "qwen2.5-coder:0.5b",
     openHomeOnLaunch: true,
@@ -145,12 +165,7 @@
     gitRequestSequence: 0,
     settingsAnimationSequence: 0,
     resourceEditorAnimationSequence: 0,
-    vtTerminal: null,
-    fitAddon: null,
-    terminalBlockID: "",
-    terminalResizeTimer: 0,
     terminalResizeObserver: null,
-    terminalReplaying: false,
     catalog: { projects: [], servers: [] },
     configPath: "",
     homeActive: false,
@@ -234,29 +249,28 @@
     return wrapped;
   };
 
+  const persistDraft = debounce((tabID, draft) => {
+    if (!bridge() || !tabID) return;
+    bridge().SaveDraft(tabID, draft).catch((error) => showAppError(error));
+  }, 250);
+
   function escapeHTML(value) {
     return String(value).replace(/[&<>"']/g, (char) => ({
       "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;",
     })[char]);
   }
 
-  const fullscreenCommands = new Set([
-    "btop", "emacs", "fzf", "htop", "lazygit", "less", "man", "micro", "more",
-    "nano", "nvim", "pico", "screen", "tig", "tmux", "top", "vi", "vim", "watch",
-  ]);
   const maxBlockOutput = 1024 * 1024;
   const outputTruncatedMarker = "… older output truncated …\n";
 
-  function commandExecutable(command) {
-    const words = String(command || "").trim().match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [];
-    let index = 0;
-    while (["command", "env", "sudo"].includes(words[index])) index += 1;
-    while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[index] || "")) index += 1;
-    return (words[index] || "").replace(/^.*\//, "").replace(/["']/g, "");
-  }
-
-  function prefersFullscreen(command) {
-    return fullscreenCommands.has(commandExecutable(command));
+  function outputChunkBytes(chunk) {
+    if (chunk?.dataBase64) {
+      const encoded = window.atob(chunk.dataBase64);
+      const value = new Uint8Array(encoded.length);
+      for (let index = 0; index < encoded.length; index += 1) value[index] = encoded.charCodeAt(index);
+      return value;
+    }
+    return new TextEncoder().encode(String(chunk?.data || ""));
   }
 
   function terminalTheme() {
@@ -265,14 +279,14 @@
       && window.matchMedia("(prefers-color-scheme: light)").matches;
     return forcedLight || systemLight
       ? {
-        background: "#efeff1", foreground: "#242426", cursor: "#242426", selectionBackground: "#00000020",
+        background: "#00000000", foreground: "#242426", cursor: "#242426", selectionBackground: "#00000020",
         black: "#343438", red: "#b7474c", green: "#367846", yellow: "#946f24",
         blue: "#356fa8", magenta: "#845495", cyan: "#267d82", white: "#d9d9dc",
         brightBlack: "#727278", brightRed: "#d15a60", brightGreen: "#46975a", brightYellow: "#b38b35",
         brightBlue: "#4b89c5", brightMagenta: "#a16bb3", brightCyan: "#369ca2", brightWhite: "#ffffff",
       }
       : {
-        background: "#141415", foreground: "#ededee", cursor: "#ededee", selectionBackground: "#ffffff28",
+        background: "#00000000", foreground: "#ededee", cursor: "#ededee", selectionBackground: "#ffffff28",
         black: "#252527", red: "#d66b70", green: "#66b77e", yellow: "#c6a35b",
         blue: "#72a3d8", magenta: "#ad86bd", cyan: "#66aaa8", white: "#d7d7da",
         brightBlack: "#737378", brightRed: "#ed8589", brightGreen: "#82c996", brightYellow: "#dbc078",
@@ -280,173 +294,152 @@
       };
   }
 
-  function resizeInteractiveTerminal() {
-    if (!state.fitAddon || !state.vtTerminal) return;
-    try { state.fitAddon.fit(); } catch (_) { return; }
-    const tab = activeTab();
-    if (!tab || !bridge()) return;
-    window.clearTimeout(state.terminalResizeTimer);
-    state.terminalResizeTimer = window.setTimeout(() => {
-      bridge().ResizeTerminal(tab.id, state.vtTerminal.cols, state.vtTerminal.rows).catch(() => {});
+  function resizeInteractiveTerminal(tab = activeTab()) {
+    if (!tab?.fitAddon || !tab.vtTerminal || tab.id !== state.activeTabID) return;
+    try { tab.fitAddon.fit(); } catch (_) { return; }
+    if (!bridge()) return;
+    window.clearTimeout(tab.terminalResizeTimer);
+    tab.terminalResizeTimer = window.setTimeout(() => {
+      bridge().ResizeTerminal(tab.id, tab.vtTerminal.cols, tab.vtTerminal.rows).catch(() => {});
     }, 30);
   }
 
-  function scheduleInteractiveResize() {
+  function scheduleInteractiveResize(tab = activeTab()) {
     requestAnimationFrame(() => {
-      resizeInteractiveTerminal();
+      resizeInteractiveTerminal(tab);
       requestAnimationFrame(() => {
-        resizeInteractiveTerminal();
-        if (state.vtTerminal) {
-          state.vtTerminal.refresh(0, Math.max(0, state.vtTerminal.rows - 1));
-        }
+        resizeInteractiveTerminal(tab);
+        tab?.vtTerminal?.refresh(0, Math.max(0, tab.vtTerminal.rows - 1));
       });
     });
   }
 
-  function initializeInteractiveTerminal() {
-    if (!window.Terminal || !window.FitAddon?.FitAddon || state.vtTerminal) return;
-    state.vtTerminal = new window.Terminal({
+  function syncTerminalHosts(active = activeTab()) {
+    for (const tab of state.tabs.values()) {
+      tab.terminalHost?.classList.toggle("is-active", tab === active);
+    }
+  }
+
+  function initializeInteractiveTerminal(tab) {
+    if (!tab || !window.Terminal || !window.FitAddon?.FitAddon || tab.vtTerminal) return;
+    tab.terminalHost = document.createElement("div");
+    tab.terminalHost.className = "tui-terminal-host";
+    tab.terminalHost.dataset.tabId = tab.id;
+    els.tuiTerminal.appendChild(tab.terminalHost);
+    tab.vtTerminal = new window.Terminal({
       allowProposedApi: false,
+      allowTransparency: true,
       convertEol: false,
-      cursorBlink: true,
-      cursorStyle: "block",
+      cursorStyle: ["block", "bar", "underline"].includes(state.settings.cursorStyle) ? state.settings.cursorStyle : "block",
+      cursorBlink: state.settings.cursorBlink !== false,
       fontFamily: fontStacks[state.settings.fontFamily] || fontStacks["SF Mono"],
       fontSize: Math.max(10, Math.min(24, Number(state.settings.fontSize) || 13)),
+      lineHeight: Math.max(1.2, Math.min(2, Number(state.settings.terminalLineHeight) || 1.3)),
       scrollback: 5000,
       theme: terminalTheme(),
     });
-    state.fitAddon = new window.FitAddon.FitAddon();
-    state.vtTerminal.loadAddon(state.fitAddon);
-    state.vtTerminal.open(els.tuiTerminal);
-    state.vtTerminal.onWriteParsed(() => {
-      if (document.body.dataset.terminalMode === "true" && state.vtTerminal) {
-        state.vtTerminal.refresh(0, Math.max(0, state.vtTerminal.rows - 1));
-      }
+    tab.fitAddon = new window.FitAddon.FitAddon();
+    tab.vtTerminal.loadAddon(tab.fitAddon);
+    tab.vtTerminal.open(tab.terminalHost);
+    tab.vtTerminal.onWriteParsed(() => {
+      const record = tab.terminalBlockID ? tab.blocks.get(tab.terminalBlockID) : null;
+      if (record) terminalBufferUpdated(tab, record);
     });
-    state.vtTerminal.onData((data) => {
-      const tab = activeTab();
-      if (!tab?.runningID || !bridge() || state.terminalReplaying || state.terminalBlockID !== tab.runningID) return;
+    tab.vtTerminal.onResize(() => {
+      const record = tab.terminalBlockID ? tab.blocks.get(tab.terminalBlockID) : null;
+      if (record && !record.alternateScreen) scheduleBlockOutputRender(record, true);
+    });
+    tab.vtTerminal.onData((data) => {
+      if (!tab.runningID || !bridge() || tab.terminalBlockID !== tab.runningID) return;
       sendTerminalInput(tab, data);
     });
-    state.terminalResizeObserver?.disconnect();
-    state.terminalResizeObserver = new ResizeObserver(resizeInteractiveTerminal);
-    state.terminalResizeObserver.observe(els.tuiTerminal);
-    scheduleInteractiveResize();
+    syncTerminalHosts();
+    scheduleInteractiveResize(tab);
   }
 
-  function disposeInteractiveTerminal() {
-    state.terminalResizeObserver?.disconnect();
-    state.terminalResizeObserver = null;
-    state.vtTerminal?.dispose();
-    state.vtTerminal = null;
-    state.fitAddon = null;
-    els.tuiTerminal.replaceChildren();
+  function disposeInteractiveTerminal(tab) {
+    if (!tab) return;
+    window.clearTimeout(tab.terminalResizeTimer);
+    tab.vtTerminal?.dispose();
+    tab.terminalHost?.remove();
+    tab.vtTerminal = null;
+    tab.fitAddon = null;
+    tab.terminalHost = null;
+    tab.terminalBlockID = "";
   }
 
-  function interactiveTerminalHasGeometry() {
-    const screen = els.tuiTerminal.querySelector(".xterm-screen");
+  function interactiveTerminalHasGeometry(tab) {
+    const screen = tab?.terminalHost?.querySelector(".xterm-screen");
     const bounds = screen?.getBoundingClientRect();
     return Boolean(
-      state.vtTerminal
-      && state.vtTerminal.cols > 1
-      && state.vtTerminal.rows > 1
+      tab?.vtTerminal
+      && tab.vtTerminal.cols > 1
+      && tab.vtTerminal.rows > 1
       && bounds
       && bounds.width > 8
       && bounds.height > 8
     );
   }
 
-  async function waitForInteractiveGeometry(frameLimit = 10) {
+  async function waitForInteractiveGeometry(tab, frameLimit = 10) {
     for (let frame = 0; frame < frameLimit; frame += 1) {
-      resizeInteractiveTerminal();
-      if (interactiveTerminalHasGeometry()) return true;
+      resizeInteractiveTerminal(tab);
+      if (interactiveTerminalHasGeometry(tab)) return true;
       await nextAnimationFrame();
     }
-    return interactiveTerminalHasGeometry();
+    return interactiveTerminalHasGeometry(tab);
   }
 
   async function prepareInteractiveRenderer(tab, record) {
     if (!tab || !record) return;
-
-    if (record.interactive) {
-      document.body.dataset.terminalMode = "true";
-      els.tuiShell.setAttribute("aria-hidden", "false");
-    }
-
+    initializeInteractiveTerminal(tab);
+    syncTerminalHosts(tab);
+    await tab.terminalWriteQueue.catch(() => {});
     await nextAnimationFrame();
-
-    // xterm must be opened in a visible element with dimensions. Recreate it for
-    // full-screen programs so a renderer opened during application bootstrap can
-    // never retain a zero-sized rendering surface.
-    if (record.interactive || !state.vtTerminal) {
-      disposeInteractiveTerminal();
-      initializeInteractiveTerminal();
-    }
-
     prepareTerminalRecord(tab, record);
-    if (record.interactive) showInteractiveTerminal(tab, record, false);
-    const rendererReady = await waitForInteractiveGeometry();
-    if (record.interactive && !rendererReady) {
-      disposeInteractiveTerminal();
-      initializeInteractiveTerminal();
+    if (!await waitForInteractiveGeometry(tab)) {
+      disposeInteractiveTerminal(tab);
+      initializeInteractiveTerminal(tab);
+      syncTerminalHosts(tab);
       prepareTerminalRecord(tab, record);
-      showInteractiveTerminal(tab, record, false);
-      if (!await waitForInteractiveGeometry()) {
+      if (!await waitForInteractiveGeometry(tab)) {
         throw new Error("interactive terminal renderer has no drawable area");
       }
     }
-    state.vtTerminal?.refresh(0, Math.max(0, state.vtTerminal.rows - 1));
+    tab.vtTerminal?.refresh(0, Math.max(0, tab.vtTerminal.rows - 1));
   }
 
-  function showInteractiveTerminal(tab, record, replay = true) {
+  function showInteractiveTerminal(tab, record) {
     if (!tab || !record) return;
-    const changed = state.terminalBlockID !== record.data.id;
-    state.terminalBlockID = record.data.id;
+    tab.terminalBlockID = record.data.id;
+    syncTerminalHosts(tab);
     document.body.dataset.terminalMode = "true";
     els.tuiShell.setAttribute("aria-hidden", "false");
-    if (!state.vtTerminal) return;
-    if (changed || replay) {
-      state.terminalReplaying = true;
-      state.vtTerminal.reset();
-      if (record.rawOutput) state.vtTerminal.write(record.rawOutput, () => { state.terminalReplaying = false; });
-      else state.terminalReplaying = false;
-    }
-    scheduleInteractiveResize();
-    requestAnimationFrame(() => state.vtTerminal?.focus());
+    scheduleInteractiveResize(tab);
+    requestAnimationFrame(() => tab.vtTerminal?.focus());
   }
 
-  function prepareTerminalRecord(tab, record, replay = false) {
-    if (!state.vtTerminal || !tab || !record) return;
-    state.terminalBlockID = record.data.id;
-    state.terminalReplaying = replay;
-    state.vtTerminal.reset();
-    if (replay && record.rawOutput) {
-      state.vtTerminal.write(record.rawOutput, () => { state.terminalReplaying = false; });
-    } else {
-      state.terminalReplaying = false;
-    }
-    requestAnimationFrame(resizeInteractiveTerminal);
+  function prepareTerminalRecord(tab, record) {
+    if (!tab?.vtTerminal || !record) return;
+    tab.terminalBlockID = record.data.id;
+    tab.vtTerminal.reset();
+    requestAnimationFrame(() => resizeInteractiveTerminal(tab));
   }
 
   function hideInteractiveTerminal(focusEditor = true) {
     document.body.dataset.terminalMode = "false";
     els.tuiShell.setAttribute("aria-hidden", "true");
-    state.terminalBlockID = "";
     if (focusEditor) requestAnimationFrame(() => els.editor.focus());
   }
 
   function syncInteractiveTerminal(tab) {
+    syncTerminalHosts(tab);
     const record = tab?.runningID ? tab.blocks.get(tab.runningID) : null;
-    if (!record) {
+    if (!record || !record.alternateScreen) {
       hideInteractiveTerminal(false);
       return;
     }
-    prepareTerminalRecord(tab, record, true);
-    if (record.interactive) showInteractiveTerminal(tab, record, false);
-    else {
-      document.body.dataset.terminalMode = "false";
-      els.tuiShell.setAttribute("aria-hidden", "true");
-    }
+    showInteractiveTerminal(tab, record);
   }
 
   function syntaxToken(value, type, extraClass = "") {
@@ -891,15 +884,27 @@
     document.documentElement.dataset.theme = theme;
     document.documentElement.dataset.reduceTransparency = String(Boolean(settings.reduceTransparency));
     document.body.dataset.showMeta = String(settings.showBlockMetadata !== false);
+    document.body.dataset.showTimestamps = String(Boolean(settings.showBlockTimestamps));
+    document.body.dataset.shellSyntax = String(settings.shellSyntaxHighlighting !== false);
+    const density = ["compact", "comfortable", "spacious"].includes(settings.blockDensity)
+      ? settings.blockDensity : "comfortable";
+    document.documentElement.dataset.blockDensity = density;
     const size = Math.max(10, Math.min(24, Number(settings.fontSize) || 13));
+    const lineHeight = Math.max(1.2, Math.min(2, Number(settings.terminalLineHeight) || 1.3));
     document.documentElement.style.setProperty("--terminal-font-size", `${size}px`);
+    document.documentElement.style.setProperty("--terminal-line-height", String(lineHeight));
     document.documentElement.style.setProperty("--mono", fontStacks[settings.fontFamily] || fontStacks["SF Mono"]);
-    if (state.vtTerminal) {
-      state.vtTerminal.options.fontFamily = fontStacks[settings.fontFamily] || fontStacks["SF Mono"];
-      state.vtTerminal.options.fontSize = size;
-      state.vtTerminal.options.theme = terminalTheme();
-      requestAnimationFrame(resizeInteractiveTerminal);
+    for (const tab of state.tabs.values()) {
+      if (!tab.vtTerminal) continue;
+      tab.vtTerminal.options.fontFamily = fontStacks[settings.fontFamily] || fontStacks["SF Mono"];
+      tab.vtTerminal.options.fontSize = size;
+      tab.vtTerminal.options.lineHeight = lineHeight;
+      tab.vtTerminal.options.cursorStyle = ["block", "bar", "underline"].includes(settings.cursorStyle)
+        ? settings.cursorStyle : "block";
+      tab.vtTerminal.options.cursorBlink = settings.cursorBlink !== false;
+      tab.vtTerminal.options.theme = terminalTheme();
     }
+    requestAnimationFrame(() => resizeInteractiveTerminal());
     autoSize();
   }
 
@@ -943,9 +948,11 @@
       id: meta.id,
       title: meta.title || titleForPath(meta.cwd),
       cwd: meta.cwd || "",
+      environment: meta.environment || "",
       remote: meta.remote || "",
       running: Boolean(meta.running),
       runningID: "",
+      interrupting: false,
       blocks: new Map(),
       history: [],
       historyIndex: -1,
@@ -958,9 +965,17 @@
       fixedTitle: "",
       selectedBlocks: new Set(),
       selectionAnchor: "",
+      blockSearchOpen: false,
+      blockSearchQuery: "",
       sshStatus: meta.remote ? { state: "connected", label: meta.remote, latencyMs: 0 } : null,
       inputQueue: Promise.resolve(),
       commands: new Set(state.commands),
+      vtTerminal: null,
+      fitAddon: null,
+      terminalHost: null,
+      terminalBlockID: "",
+      terminalResizeTimer: 0,
+      terminalWriteQueue: Promise.resolve(),
       pane,
       element,
     };
@@ -993,6 +1008,15 @@
     els.sshHealthLatency.textContent = stateName === "connected" && latency > 0 ? `${latency} ms` : "";
     els.sshHealth.title = status?.message || (stateName === "connected" ? `${status?.label || tab.remote} · connected` : "Click to retry now");
     els.sshHealth.disabled = stateName === "connecting";
+  }
+
+  function renderEnvironmentContext(tab = activeTab()) {
+    const label = String(tab?.environment || "").trim();
+    const visible = Boolean(label);
+    els.environmentSeparator.hidden = !visible;
+    els.environmentContext.hidden = !visible;
+    els.environmentLabel.textContent = label;
+    els.environmentContext.title = visible ? `Active environment: ${label}` : "Active shell environment";
   }
 
   function updateSSHStatus(payload) {
@@ -1161,6 +1185,7 @@
   function removeTab(tabID) {
     const tab = state.tabs.get(tabID);
     if (!tab) return;
+    disposeInteractiveTerminal(tab);
     tab.element.remove();
     tab.pane.remove();
     state.tabs.delete(tabID);
@@ -1173,10 +1198,12 @@
     if (current) {
       current.editorDraft = els.editor.value;
       current.scrollTop = els.terminal.scrollTop;
+      if (bridge()) bridge().SaveDraft(current.id, current.editorDraft).catch((error) => showAppError(error));
     }
     state.activeTabID = tabID;
     state.lastTabID = tabID;
     state.homeActive = false;
+    if (bridge()) bridge().ActivateTab(tabID).catch((error) => showAppError(error));
     document.body.dataset.home = "false";
     els.homeScreen.hidden = true;
     els.homeButton.setAttribute("aria-pressed", "false");
@@ -1191,6 +1218,7 @@
     setEditor(next.editorDraft);
     els.cwd.textContent = displayPath(next);
     els.cwd.title = next.remote ? `${next.remote}:${next.cwd}` : next.cwd;
+    renderEnvironmentContext(next);
     renderGitContext(next.gitInfo);
     renderSSHStatus(next);
     refreshGitContext(tabID);
@@ -1199,7 +1227,9 @@
     requestAnimationFrame(() => { els.terminal.scrollTop = next.scrollTop; });
     refreshHistory(next);
     updateBlockSelectionToolbar(next);
+    refreshBlockSearch(next);
     syncInteractiveTerminal(next);
+    if (next.vtTerminal) scheduleInteractiveResize(next);
     if (document.body.dataset.terminalMode !== "true") els.editor.focus();
   }
 
@@ -1604,7 +1634,10 @@
 
   function updateEditorState() {
     const tab = activeTab();
-    if (tab) tab.editorDraft = els.editor.value;
+    if (tab) {
+      tab.editorDraft = els.editor.value;
+      persistDraft(tab.id, tab.editorDraft);
+    }
     autoSize();
     refreshSyntax();
     refreshGhost();
@@ -1617,7 +1650,7 @@
     if (force || nearBottom) requestAnimationFrame(() => { els.terminal.scrollTop = els.terminal.scrollHeight; });
   }
 
-  function createBlock(block) {
+  function createBlock(block, restored = false) {
     const tab = state.tabs.get(block.tabId) || activeTab();
     if (!tab) return;
     const node = document.createElement("article");
@@ -1632,30 +1665,31 @@
             <svg aria-hidden="true" viewBox="0 0 16 16"><path d="m4 8 2.5 2.5L12 5"/></svg>
           </button>
           <span class="block-status"><span class="status-icon"></span><span class="status-text">running</span></span>
+          <button class="block-rerun" data-rerun-block="${escapeHTML(block.id)}" type="button" aria-label="Run command again" title="Run command again" hidden>
+            <svg aria-hidden="true" viewBox="0 0 16 16"><path d="M12.5 6A5 5 0 1 0 13 10M12.5 3v3.5H9"/></svg>
+          </button>
           <button class="block-copy" data-copy-block="${escapeHTML(block.id)}" aria-label="Copy command and output" title="Copy command and output">
             <svg aria-hidden="true" viewBox="0 0 16 16"><rect x="5" y="5" width="8" height="8" rx="2"></rect><path d="M3 10V4.5C3 3.7 3.7 3 4.5 3H10"></path></svg>
           </button>
         </span>
       </div>
       <pre class="block-output"></pre>
-      <div class="block-meta" hidden><span class="block-cwd">${escapeHTML(shortPath(block.cwd))}</span><span class="block-result"></span></div>`;
+      <div class="block-meta" hidden><span class="block-cwd">${escapeHTML(shortPath(block.cwd))}</span><span class="block-meta-trailing"><span class="block-time"></span><span class="block-result"></span></span></div>`;
     tab.pane.appendChild(node);
     const record = {
       data: block,
       node,
       output: "",
       rawOutput: "",
-      escapeTail: "",
-      interactive: prefersFullscreen(block.command),
+      outputDecoder: new TextDecoder(),
+      interactive: false,
+      alternateScreen: false,
       outputRenderScheduled: false,
       outputTruncated: false,
     };
     tab.blocks.set(block.id, record);
-    if (tab.id === state.activeTabID) prepareTerminalRecord(tab, record);
-    if (record.interactive) {
-      node.classList.add("is-interactive");
-      if (tab.id === state.activeTabID) showInteractiveTerminal(tab, record, false);
-    }
+    node.querySelector(".block-time").textContent = formatTimestamp(block.startedAt);
+    if (tab.id === state.activeTabID && tab.blockSearchOpen) refreshBlockSearch(tab);
     if (tab.id === state.activeTabID) scrollToBottom(true);
   }
 
@@ -1846,6 +1880,13 @@
     }
   }
 
+  async function rerunBlock(blockID) {
+    const tab = activeTab();
+    const record = tab?.blocks.get(blockID);
+    if (!record || tab.running) return;
+    await executeCommand(tab, record.data.command, false);
+  }
+
   function selectedBlockRecords(tab = activeTab()) {
     if (!tab) return [];
     return [...tab.blocks.values()].filter((record) => tab.selectedBlocks.has(record.data.id));
@@ -1910,79 +1951,26 @@
     }, 1100);
   }
 
-  const lsKinds = [
-    ["ls-archive", new Set(["7z", "bz2", "dmg", "gz", "pkg", "rar", "tar", "tbz", "tgz", "xz", "zip", "zst"])],
-    ["ls-media", new Set(["avif", "gif", "heic", "jpeg", "jpg", "m4a", "mov", "mp3", "mp4", "png", "svg", "webp", "wav"])],
-    ["ls-source", new Set(["c", "cpp", "css", "go", "h", "hpp", "html", "java", "js", "jsx", "kt", "m", "md", "py", "rb", "rs", "sh", "swift", "ts", "tsx", "vue"])],
-    ["ls-config", new Set(["ini", "json", "plist", "toml", "xml", "yaml", "yml"])],
-    ["ls-document", new Set(["doc", "docx", "pdf", "ppt", "pptx", "rtf", "txt", "xls", "xlsx"])],
-  ];
-
-  function isLsCommand(command) {
-    return /^(?:(?:command|sudo)\s+)?(?:\/[^\s]+\/)?ls(?:\s|$)/.test(String(command || "").trim());
-  }
-
-  function lsKindForName(value) {
-    const name = value.replace(/[|=>@*]+$/, "");
-    if (value.endsWith("/")) return "ls-directory";
-    if (value.endsWith("@")) return "ls-symlink";
-    if (value.endsWith("*")) return "ls-executable";
-    const extension = name.includes(".") ? name.split(".").pop().toLowerCase() : "";
-    return lsKinds.find(([, extensions]) => extensions.has(extension))?.[0] || "";
-  }
-
-  function highlightLsOutput(output, command) {
-    if (!isLsCommand(command)) return;
-    const walker = document.createTreeWalker(output, NodeFilter.SHOW_TEXT);
-    const nodes = [];
-    while (walker.nextNode()) nodes.push(walker.currentNode);
-    for (const node of nodes) {
-      if (!node.nodeValue?.trim() || node.parentElement?.closest('.ansi-run, [class*="ansi-"], .ls-kind')) continue;
-      const parts = node.nodeValue.split(/(\s+)/);
-      if (!parts.some((part) => lsKindForName(part))) continue;
-      const fragment = document.createDocumentFragment();
-      for (const part of parts) {
-        const kind = lsKindForName(part);
-        if (!kind) {
-          fragment.append(document.createTextNode(part));
-          continue;
-        }
-        const span = document.createElement("span");
-        span.className = `ls-kind ${kind}`;
-        span.textContent = part;
-        fragment.append(span);
-      }
-      node.replaceWith(fragment);
-    }
-  }
-
   function appendOutput(chunk) {
     const tab = state.tabs.get(chunk.tabId);
     const record = tab?.blocks.get(chunk.blockId);
     if (!record) return;
     const output = record.node.querySelector(".block-output");
-    record.rawOutput += chunk.data;
+    const bytes = outputChunkBytes(chunk);
+    const decoded = record.outputDecoder.decode(bytes, { stream: true });
+    record.rawOutput += decoded;
     if (record.rawOutput.length > 4 * 1024 * 1024) record.rawOutput = record.rawOutput.slice(-4 * 1024 * 1024);
-    const probe = record.escapeTail + chunk.data;
-    record.escapeTail = probe.slice(-48);
-    const enteredAlternateScreen = /\x1b\[\?(?:47|1047|1049)h/.test(probe);
-    if (tab.id === state.activeTabID && state.terminalBlockID === record.data.id) {
-      state.vtTerminal?.write(chunk.data);
-    }
-    if (enteredAlternateScreen && !record.interactive) {
-      record.interactive = true;
-      record.output = "";
-      output.replaceChildren();
-      output.hidden = true;
-      record.node.classList.add("is-interactive");
-      if (tab.id === state.activeTabID) {
-        showInteractiveTerminal(tab, record, false);
-      }
-    }
-    if (record.interactive) return;
-    appendBlockText(record, chunk.data);
-    scheduleBlockOutputRender(record);
     if (chunk.stream === "stderr") output.dataset.hasStderr = "true";
+    if (tab.vtTerminal && tab.terminalBlockID === record.data.id) {
+      tab.terminalWriteQueue = tab.terminalWriteQueue
+        .catch(() => {})
+        .then(() => new Promise((resolve) => tab.vtTerminal.write(bytes, resolve)));
+    } else {
+      // Restored blocks and local UI errors do not own a PTY. Keep a small
+      // fallback path for them; live command output always goes through xterm.
+      appendBlockText(record, decoded);
+      scheduleBlockOutputRender(record);
+    }
     if (tab.id === state.activeTabID) scrollToBottom();
   }
 
@@ -2017,19 +2005,121 @@
     }
   }
 
-  function renderBlockOutput(record) {
-    record.outputRenderScheduled = false;
-    if (record.interactive || !record.node.isConnected) return;
-    const output = record.node.querySelector(".block-output");
-    output.innerHTML = renderANSI(record.output);
-    highlightLsOutput(output, record.data.command);
-    if (record.output) output.dataset.visible = "true";
+  function terminalCellColor(cell, foreground) {
+    if (foreground ? cell.isFgDefault() : cell.isBgDefault()) return "";
+    const value = foreground ? cell.getFgColor() : cell.getBgColor();
+    if (foreground ? cell.isFgRGB() : cell.isBgRGB()) {
+      return ansiRGB((value >> 16) & 255, (value >> 8) & 255, value & 255);
+    }
+    if (foreground ? cell.isFgPalette() : cell.isBgPalette()) return xtermColor(value);
+    return "";
   }
 
-  function scheduleBlockOutputRender(record) {
+  function terminalCellStyle(cell) {
+    let foreground = terminalCellColor(cell, true);
+    let background = terminalCellColor(cell, false);
+    if (cell.isInverse()) {
+      [foreground, background] = [background || "var(--canvas)", foreground || "var(--text)"];
+    }
+    const styles = [];
+    if (foreground) styles.push(`color:${foreground}`);
+    if (background) styles.push(`background-color:${background}`);
+    if (cell.isBold()) styles.push("font-weight:700");
+    if (cell.isDim()) styles.push("opacity:.62");
+    if (cell.isItalic()) styles.push("font-style:italic");
+    const decorations = [];
+    if (cell.isUnderline()) decorations.push("underline");
+    if (cell.isStrikethrough()) decorations.push("line-through");
+    if (decorations.length) styles.push(`text-decoration-line:${decorations.join(" ")}`);
+    if (cell.isInvisible()) styles.push("visibility:hidden");
+    return styles.join(";");
+  }
+
+  function terminalBufferSnapshot(terminal) {
+    const buffer = terminal?.buffer?.normal;
+    if (!buffer) return { html: "", text: "" };
+    const rows = [];
+    for (let row = 0; row < buffer.length; row += 1) {
+      const line = buffer.getLine(row);
+      if (!line) continue;
+      const cells = [];
+      for (let column = 0; column < terminal.cols; column += 1) {
+        const cell = line.getCell(column);
+        if (!cell || cell.getWidth() === 0) continue;
+        const style = terminalCellStyle(cell);
+        const chars = cell.getChars() || " ";
+        cells.push({ chars: cell.isInvisible() ? " " : chars, style });
+      }
+      while (cells.length && cells.at(-1).chars === " " && !cells.at(-1).style) cells.pop();
+      let html = "";
+      let text = "";
+      let runStyle = null;
+      let runText = "";
+      const flush = () => {
+        if (!runText) return;
+        html += runStyle ? `<span class="ansi-run" style="${runStyle}">${escapeHTML(runText)}</span>` : escapeHTML(runText);
+        runText = "";
+      };
+      for (const cell of cells) {
+        if (cell.style !== runStyle) {
+          flush();
+          runStyle = cell.style;
+        }
+        runText += cell.chars;
+        text += cell.chars;
+      }
+      flush();
+      rows.push({ html, text, visible: cells.length > 0, wrapped: Boolean(line.isWrapped) });
+    }
+    while (rows.length && !rows.at(-1).visible) rows.pop();
+    let text = "";
+    rows.forEach((row, index) => {
+      if (index > 0 && !row.wrapped) text += "\n";
+      text += row.text;
+    });
+    return {
+      html: rows.map((row) => row.html).join("\n"),
+      text,
+    };
+  }
+
+  function terminalBufferUpdated(tab, record) {
+    if (!tab?.vtTerminal || tab.terminalBlockID !== record.data.id) return;
+    const alternate = tab.vtTerminal.buffer.active.type === "alternate";
+    record.alternateScreen = alternate;
+    if (alternate) {
+      record.interactive = true;
+      record.node.classList.add("is-interactive");
+      record.node.querySelector(".block-output").hidden = true;
+      if (tab.id === state.activeTabID && tab.runningID === record.data.id) showInteractiveTerminal(tab, record);
+      return;
+    }
+    record.node.querySelector(".block-output").hidden = false;
+    if (tab.id === state.activeTabID && document.body.dataset.terminalMode === "true") hideInteractiveTerminal(false);
+    scheduleBlockOutputRender(record, true);
+  }
+
+  function renderBlockOutput(record, fromTerminal = false) {
+    record.outputRenderScheduled = false;
+    if (record.alternateScreen || !record.node.isConnected) return;
+    const output = record.node.querySelector(".block-output");
+    const ownerTab = state.tabs.get(record.data.tabId);
+    if (fromTerminal && ownerTab?.vtTerminal && ownerTab.terminalBlockID === record.data.id) {
+      const snapshot = terminalBufferSnapshot(ownerTab.vtTerminal);
+      record.output = snapshot.text;
+      output.innerHTML = snapshot.html;
+    } else {
+      output.innerHTML = renderANSI(record.output);
+    }
+    if (record.output) output.dataset.visible = "true";
+    const currentTab = activeTab();
+    if (currentTab?.blockSearchOpen && currentTab.blocks.get(record.data.id) === record) updateBlockSearchRecord(currentTab, record);
+  }
+
+  function scheduleBlockOutputRender(record, fromTerminal = false) {
     if (record.outputRenderScheduled) return;
     record.outputRenderScheduled = true;
-    requestAnimationFrame(() => renderBlockOutput(record));
+    requestAnimationFrame(() => renderBlockOutput(record, fromTerminal));
   }
 
   function formatDuration(ms) {
@@ -2038,43 +2128,62 @@
     return `${Math.floor(ms / 60000)}m ${Math.round((ms % 60000) / 1000)}s`;
   }
 
-  function finishBlock(payload) {
+  function formatTimestamp(value) {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "";
+    return new Intl.DateTimeFormat(undefined, {
+      hour: "2-digit", minute: "2-digit", second: "2-digit",
+    }).format(date);
+  }
+
+  function finishBlock(payload, restored = false) {
     const block = payload.block || payload.Block || payload;
     const tab = state.tabs.get(block.tabId);
     const record = tab?.blocks.get(block.id);
     if (!tab || !record) return;
     record.data = block;
-    if (!record.interactive) renderBlockOutput(record);
+    record.rawOutput += record.outputDecoder.decode();
+    if (!record.alternateScreen) {
+      tab.terminalWriteQueue
+        .catch(() => {})
+        .then(() => renderBlockOutput(record, Boolean(tab.vtTerminal)));
+    }
     record.node.dataset.state = block.state;
-    record.node.querySelector(".status-text").textContent = block.state === "succeeded" ? "done" : block.state;
+    const exitCode = Number.isInteger(block.exitCode) ? block.exitCode : null;
+    record.node.querySelector(".status-text").textContent = block.state === "succeeded"
+      ? "done"
+      : block.state === "failed" && exitCode !== null ? `failed · ${exitCode}` : block.state;
+    record.node.querySelector("[data-rerun-block]").hidden = false;
     const meta = record.node.querySelector(".block-meta");
     meta.hidden = false;
     record.node.querySelector(".block-cwd").textContent = shortPath(block.finalCwd || block.cwd);
+    record.node.querySelector(".block-time").textContent = formatTimestamp(block.startedAt);
     record.node.querySelector(".block-result").textContent = formatDuration(block.durationMs || 0);
     tab.running = false;
     tab.runningID = "";
+    tab.interrupting = false;
     tab.cwd = block.finalCwd || tab.cwd;
     tab.remote = block.remote || "";
+    tab.environment = block.environment || "";
     tab.title = tab.fixedTitle || tab.remote || titleForPath(tab.cwd);
     renderTab(tab);
-    refreshGitContext(tab.id);
+    if (!restored) refreshGitContext(tab.id);
     if (record.interactive) {
       record.node.classList.add("interactive-finished");
-      record.rawOutput = "";
-      if (tab.id === state.activeTabID && state.terminalBlockID === block.id) hideInteractiveTerminal(false);
-    } else if (tab.id === state.activeTabID && state.terminalBlockID === block.id) {
-      state.terminalBlockID = "";
+      if (tab.id === state.activeTabID && tab.terminalBlockID === block.id) hideInteractiveTerminal(false);
     }
     if (tab.id === state.activeTabID) {
       els.cwd.textContent = displayPath(tab);
       els.cwd.title = tab.remote ? `${tab.remote}:${tab.cwd}` : tab.cwd;
+      renderEnvironmentContext(tab);
       renderSSHStatus(tab);
       setComposerRunning(false);
       els.editor.focus();
       refreshHistory(tab);
       scrollToBottom(true);
     }
-    refreshCommandInventory(tab.id);
+    if (!restored) refreshCommandInventory(tab.id);
+    if (tab.id === state.activeTabID && tab.blockSearchOpen) refreshBlockSearch(tab);
     if (block.state === "succeeded" && tab.launchQueue.length) {
       window.setTimeout(() => runNextLaunchCommand(tab), 0);
     } else if (block.state !== "succeeded") {
@@ -2090,6 +2199,8 @@
       clearBlocks();
       if (clearComposer) setEditor("");
       tab.editorDraft = "";
+      persistDraft.cancel();
+      bridge().SaveDraft(tab.id, "").catch((error) => showAppError(error));
       return;
     }
     if (isActive) clearSuggestions();
@@ -2097,18 +2208,21 @@
       const block = await bridge().Execute(tab.id, command);
       tab.running = true;
       tab.runningID = block.id;
+      tab.interrupting = false;
       tab.history.push(command);
       tab.editorDraft = "";
+      persistDraft.cancel();
+      bridge().SaveDraft(tab.id, "").catch((error) => showAppError(error));
       renderTab(tab);
       createBlock(block);
       if (isActive && clearComposer) setEditor("");
       if (isActive) setComposerRunning(true);
       const record = tab.blocks.get(block.id);
       if (isActive) await prepareInteractiveRenderer(tab, record);
-      if (isActive && state.vtTerminal && state.fitAddon) {
+      if (isActive && tab.vtTerminal && tab.fitAddon) {
         try {
-          state.fitAddon.fit();
-          await bridge().ResizeTerminal(tab.id, state.vtTerminal.cols, state.vtTerminal.rows);
+          tab.fitAddon.fit();
+          await bridge().ResizeTerminal(tab.id, tab.vtTerminal.cols, tab.vtTerminal.rows);
         } catch (_) { /* the PTY keeps its safe default size */ }
       }
       await bridge().StartBlock(tab.id, block.id);
@@ -2150,8 +2264,14 @@
 
   async function cancelRunning() {
     const tab = activeTab();
-    if (tab?.runningID && bridge()) {
-      try { await bridge().Cancel(tab.id, tab.runningID); } catch (error) { showAppError(error); }
+    if (!tab?.runningID || tab.interrupting || !bridge()) return;
+    tab.interrupting = true;
+    try {
+      const accepted = await bridge().Cancel(tab.id, tab.runningID);
+      if (!accepted) tab.interrupting = false;
+    } catch (error) {
+      tab.interrupting = false;
+      showAppError(error);
     }
   }
 
@@ -2172,6 +2292,65 @@
     requestSuggestions();
   }
 
+  function blockSearchText(record) {
+    return [record.data.command, record.data.cwd, record.data.finalCwd, record.interactive ? record.rawOutput : record.output]
+      .filter(Boolean)
+      .map((value) => plainTerminalText(value))
+      .join("\n")
+      .toLowerCase();
+  }
+
+  function updateBlockSearchCount(tab, query) {
+    let matches = 0;
+    for (const record of tab.blocks.values()) {
+      if (!record.node.hidden) matches += 1;
+    }
+    els.blockSearchCount.textContent = query
+      ? `${matches} of ${tab.blocks.size}`
+      : `${tab.blocks.size} ${tab.blocks.size === 1 ? "block" : "blocks"}`;
+  }
+
+  function updateBlockSearchRecord(tab, record) {
+    const query = tab.blockSearchQuery.trim().toLowerCase();
+    record.node.hidden = Boolean(query) && !blockSearchText(record).includes(query);
+    updateBlockSearchCount(tab, query);
+  }
+
+  function refreshBlockSearch(tab = activeTab()) {
+    if (!tab || tab.id !== state.activeTabID || state.homeActive) {
+      els.blockSearch.hidden = true;
+      return;
+    }
+    els.blockSearch.hidden = !tab.blockSearchOpen;
+    if (els.blockSearchInput.value !== tab.blockSearchQuery) els.blockSearchInput.value = tab.blockSearchQuery;
+    const query = tab.blockSearchQuery.trim().toLowerCase();
+    for (const record of tab.blocks.values()) {
+      record.node.hidden = Boolean(query) && !blockSearchText(record).includes(query);
+    }
+    updateBlockSearchCount(tab, query);
+  }
+
+  function openBlockSearch() {
+    const tab = activeTab();
+    if (!tab || document.body.dataset.terminalMode === "true") return;
+    tab.blockSearchOpen = true;
+    refreshBlockSearch(tab);
+    requestAnimationFrame(() => {
+      els.blockSearchInput.focus();
+      els.blockSearchInput.select();
+    });
+  }
+
+  function closeBlockSearch(focusEditor = true) {
+    const tab = activeTab();
+    if (!tab) return;
+    tab.blockSearchOpen = false;
+    tab.blockSearchQuery = "";
+    for (const record of tab.blocks.values()) record.node.hidden = false;
+    els.blockSearch.hidden = true;
+    if (focusEditor) els.editor.focus();
+  }
+
   function clearBlocks() {
     const tab = activeTab();
     if (!tab) return;
@@ -2185,6 +2364,8 @@
       tab.pane.appendChild(running.node);
     }
     updateBlockSelectionToolbar(tab);
+    refreshBlockSearch(tab);
+    if (bridge()) bridge().ClearBlocks(tab.id).catch((error) => showAppError(error));
     els.editor.focus();
   }
 
@@ -2211,11 +2392,17 @@
     if (radio) radio.checked = true;
     els.fontFamily.value = settings.fontFamily || defaults.fontFamily;
     els.fontSize.value = settings.fontSize || defaults.fontSize;
+    els.terminalLineHeight.value = settings.terminalLineHeight || defaults.terminalLineHeight;
+    els.blockDensity.value = settings.blockDensity || defaults.blockDensity;
+    els.cursorStyle.value = settings.cursorStyle || defaults.cursorStyle;
+    els.cursorBlink.checked = settings.cursorBlink !== false;
+    els.shellSyntaxHighlighting.checked = settings.shellSyntaxHighlighting !== false;
     els.defaultPath.value = settings.defaultPath || defaults.defaultPath;
     els.shellPath.value = settings.shell || "";
     els.aiEnabled.checked = settings.aiEnabled !== false;
     els.reduceTransparency.checked = Boolean(settings.reduceTransparency);
     els.showBlockMetadata.checked = settings.showBlockMetadata !== false;
+    els.showBlockTimestamps.checked = Boolean(settings.showBlockTimestamps);
     els.openHomeOnLaunch.checked = settings.openHomeOnLaunch !== false;
     els.runProjectCommands.checked = settings.runProjectCommands !== false;
     els.sshHelperEnabled.checked = settings.sshHelperEnabled !== false;
@@ -2233,12 +2420,18 @@
       theme: els.settingsForm.querySelector('input[name="theme"]:checked')?.value || "system",
       fontFamily: els.fontFamily.value,
       fontSize: Number(els.fontSize.value),
+      terminalLineHeight: Number(els.terminalLineHeight.value),
+      blockDensity: els.blockDensity.value,
+      cursorStyle: els.cursorStyle.value,
+      cursorBlink: els.cursorBlink.checked,
+      shellSyntaxHighlighting: els.shellSyntaxHighlighting.checked,
       defaultPath: els.defaultPath.value.trim(),
       shell: els.shellPath.value.trim(),
       aiEnabled: els.aiEnabled.checked,
       aiModel: defaults.aiModel,
       reduceTransparency: els.reduceTransparency.checked,
       showBlockMetadata: els.showBlockMetadata.checked,
+      showBlockTimestamps: els.showBlockTimestamps.checked,
       openHomeOnLaunch: els.openHomeOnLaunch.checked,
       runProjectCommands: els.runProjectCommands.checked,
       sshHelperEnabled: els.sshHelperEnabled.checked,
@@ -2376,6 +2569,8 @@
 
   async function init() {
     registerEvents();
+    state.terminalResizeObserver = new ResizeObserver(() => resizeInteractiveTerminal());
+    state.terminalResizeObserver.observe(els.tuiTerminal);
     if (bridge()) {
       try {
         const initial = await bridge().InitialState();
@@ -2385,7 +2580,25 @@
         state.configPath = initial.configPath || "";
         applyVisualSettings(state.settings);
         renderHome();
-        for (const meta of initial.tabs || []) addTab(meta);
+        const restoredTabs = new Map((initial.workspace?.tabs || []).map((saved) => [saved.tab?.id, saved]));
+        for (const meta of initial.tabs || []) {
+          const tab = addTab(meta);
+          const saved = restoredTabs.get(meta.id);
+          if (!tab || !saved) continue;
+          tab.editorDraft = saved.draft || "";
+          for (const record of saved.blocks || []) {
+            const block = record.block;
+            if (!block) continue;
+            createBlock(block, true);
+            const restoredRecord = tab.blocks.get(block.id);
+            if (record.output && restoredRecord) {
+              restoredRecord.rawOutput = record.output;
+              appendBlockText(restoredRecord, record.output);
+              renderBlockOutput(restoredRecord);
+            }
+            finishBlock({ block }, true);
+          }
+        }
         const first = initial.activeTabId || initial.tabs?.[0]?.id;
         const firstTab = state.tabs.get(first);
         state.home = firstTab?.cwd.match(/^\/Users\/[^/]+|^\/home\/[^/]+/)?.[0] || "";
@@ -2418,8 +2631,17 @@
   // the document boundary so prompts work regardless of which visible element
   // currently has focus.
   document.addEventListener("keydown", (event) => {
+    const tab = activeTab();
+    // Ctrl+C is a terminal interrupt whenever a command owns the PTY. Text
+    // selection must not turn it into Copy: macOS uses Cmd+C for that, while
+    // terminals on other platforms conventionally use Ctrl+Shift+C.
+    if (tab?.runningID && event.ctrlKey && !event.metaKey && !event.shiftKey && event.key.toLowerCase() === "c") {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      cancelRunning();
+      return;
+    }
     if (!capturesRunningInput()) return;
-    if (event.ctrlKey && event.key.toLowerCase() === "c" && !window.getSelection()?.isCollapsed) return;
     const sequence = terminalSequenceForKey(event);
     if (sequence === null) return;
     event.preventDefault();
@@ -2526,6 +2748,11 @@
       toggleBlockSelection(select.dataset.selectBlock, event.shiftKey);
       return;
     }
+    const rerun = event.target.closest("[data-rerun-block]");
+    if (rerun) {
+      rerunBlock(rerun.dataset.rerunBlock);
+      return;
+    }
     const button = event.target.closest("[data-copy-block]");
     if (button) {
       copyBlock(button.dataset.copyBlock, button);
@@ -2543,6 +2770,20 @@
   els.copySelectedCommands.addEventListener("click", () => copySelectedBlocks(false, els.copySelectedCommands));
   els.copySelectedBlocks.addEventListener("click", () => copySelectedBlocks(true, els.copySelectedBlocks));
   els.clearBlockSelection.addEventListener("click", () => clearBlockSelection());
+  els.blockSearchInput.addEventListener("input", () => {
+    const tab = activeTab();
+    if (!tab) return;
+    tab.blockSearchQuery = els.blockSearchInput.value;
+    refreshBlockSearch(tab);
+  });
+  els.blockSearchInput.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      closeBlockSearch();
+    }
+  });
+  els.blockSearchClose.addEventListener("click", () => closeBlockSearch());
 
   els.homeButton.addEventListener("click", showHome);
   els.homeSearch.addEventListener("input", renderHome);
@@ -2637,6 +2878,23 @@
       setSettingsBusy(false);
     }
   });
+  els.exportSSHConfig.addEventListener("click", async () => {
+    if (!bridge() || state.settingsBusy) return;
+    setSettingsBusy(true);
+    const originalLabel = els.exportSSHConfig.textContent;
+    try {
+      const result = await bridge().ExportSSHConfig();
+      if (result?.path) {
+        els.exportSSHConfig.textContent = `Exported ${result.hosts}`;
+        els.settingsError.hidden = true;
+        window.setTimeout(() => { els.exportSSHConfig.textContent = originalLabel; }, 1800);
+      }
+    } catch (error) {
+      showSettingsError(cleanError(error));
+    } finally {
+      setSettingsBusy(false);
+    }
+  });
 
   function trapModalFocus(event, container) {
     if (event.key !== "Tab") return;
@@ -2672,13 +2930,13 @@
       trapModalFocus(event, els.settingsPanel);
       return;
     }
+    if (event.key === "Escape" && activeTab()?.blockSearchOpen) {
+      event.preventDefault(); closeBlockSearch(); return;
+    }
     if (event.key === "Escape" && activeTab()?.selectedBlocks.size) {
       event.preventDefault(); clearBlockSelection(); return;
     }
     if (document.body.dataset.terminalMode === "true" && !event.metaKey) return;
-    if (event.ctrlKey && event.key.toLowerCase() === "c" && activeTab()?.runningID && window.getSelection()?.isCollapsed) {
-      event.preventDefault(); cancelRunning(); return;
-    }
     if (command && event.key.toLowerCase() === "c" && activeTab()?.selectedBlocks.size) {
       const editorHasSelection = document.activeElement === els.editor && els.editor.selectionStart !== els.editor.selectionEnd;
       const pageHasSelection = !window.getSelection()?.isCollapsed;
@@ -2692,14 +2950,24 @@
     if (command && event.key.toLowerCase() === "k") {
       event.preventDefault(); els.editor.focus(); els.editor.select(); return;
     }
+    if (command && event.key.toLowerCase() === "n") {
+      event.preventDefault();
+      if (bridge()) bridge().NewWindow().catch((error) => showAppError(error));
+      return;
+    }
     if (command && event.key.toLowerCase() === "t") {
       event.preventDefault(); newTab(); return;
     }
     if (command && event.shiftKey && event.key.toLowerCase() === "h") {
       event.preventDefault(); showHome(); return;
     }
-    if (command && event.key.toLowerCase() === "f" && state.homeActive) {
-      event.preventDefault(); els.homeSearch.focus(); els.homeSearch.select(); return;
+    if (command && event.key.toLowerCase() === "f") {
+      if (state.homeActive) {
+        event.preventDefault(); els.homeSearch.focus(); els.homeSearch.select(); return;
+      }
+      if (document.body.dataset.terminalMode !== "true") {
+        event.preventDefault(); openBlockSearch(); return;
+      }
     }
     if (command && event.key.toLowerCase() === "w") {
       event.preventDefault(); if (state.activeTabID) closeTab(state.activeTabID); return;

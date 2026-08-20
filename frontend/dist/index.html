@@ -67,6 +67,14 @@
       </section>
 
       <main class="terminal" id="terminal">
+        <div class="block-search" id="block-search" role="search" hidden>
+          <svg aria-hidden="true" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg>
+          <input id="block-search-input" type="search" aria-label="Search command blocks" placeholder="Search commands and output" autocomplete="off" spellcheck="false">
+          <span id="block-search-count" aria-live="polite"></span>
+          <button id="block-search-close" type="button" aria-label="Close block search" title="Close search (Esc)">
+            <svg aria-hidden="true" viewBox="0 0 16 16"><path d="m4 4 8 8M12 4l-8 8"/></svg>
+          </button>
+        </div>
         <section class="blocks" id="blocks" aria-live="polite"></section>
         <div class="bottom-spacer"></div>
       </main>
@@ -102,6 +110,11 @@
           </div>
           <div class="composer-context">
             <span class="cwd" id="cwd" title="Current directory">Loading…</span>
+            <span class="context-separator" id="environment-separator" aria-hidden="true" hidden></span>
+            <span class="environment-context" id="environment-context" title="Active shell environment" hidden>
+              <span class="environment-dot" aria-hidden="true"></span>
+              <span id="environment-label"></span>
+            </span>
             <span class="context-separator" id="ssh-separator" aria-hidden="true" hidden></span>
             <button class="ssh-health" id="ssh-health" type="button" hidden>
               <span class="ssh-health-dot" aria-hidden="true"></span>
@@ -163,6 +176,34 @@
               <span><strong>Font size</strong><small>10–24 pixels</small></span>
               <input class="number-input" id="font-size" name="fontSize" type="number" min="10" max="24" step="1">
             </label>
+            <label class="settings-row">
+              <span><strong>Line height</strong><small>1.20–2.00</small></span>
+              <input class="number-input" id="terminal-line-height" name="terminalLineHeight" type="number" min="1.2" max="2" step="0.05">
+            </label>
+            <label class="settings-row">
+              <span><strong>Block spacing</strong><small>Vertical command rhythm</small></span>
+              <select id="block-density" name="blockDensity">
+                <option value="compact">Compact</option>
+                <option value="comfortable">Comfortable</option>
+                <option value="spacious">Spacious</option>
+              </select>
+            </label>
+            <label class="settings-row">
+              <span><strong>Interactive cursor</strong><small>Used by full-screen terminal apps</small></span>
+              <select id="cursor-style" name="cursorStyle">
+                <option value="block">Block</option>
+                <option value="bar">Bar</option>
+                <option value="underline">Underline</option>
+              </select>
+            </label>
+            <label class="settings-row">
+              <span><strong>Blinking cursor</strong><small>Animate the interactive terminal cursor</small></span>
+              <input class="switch" id="cursor-blink" name="cursorBlink" type="checkbox">
+            </label>
+            <label class="settings-row">
+              <span><strong>Shell syntax colours</strong><small>Colour commands, options, paths and variables</small></span>
+              <input class="switch" id="shell-syntax-highlighting" name="shellSyntaxHighlighting" type="checkbox">
+            </label>
           </fieldset>
 
           <fieldset class="settings-group">
@@ -203,6 +244,10 @@
               <span><strong>Command metadata</strong><small>Show directory, status and duration</small></span>
               <input class="switch" id="show-block-metadata" name="showBlockMetadata" type="checkbox">
             </label>
+            <label class="settings-row">
+              <span><strong>Command timestamps</strong><small>Show local start time in block metadata</small></span>
+              <input class="switch" id="show-block-timestamps" name="showBlockTimestamps" type="checkbox">
+            </label>
           </fieldset>
 
           <fieldset class="settings-group">
@@ -215,6 +260,10 @@
               <span><strong>SSH workspace helper</strong><small>Temporary completion and Git helper; removed on disconnect</small></span>
               <input class="switch" id="ssh-helper-enabled" name="sshHelperEnabled" type="checkbox">
             </label>
+            <div class="settings-row">
+              <span><strong>OpenSSH configuration</strong><small>Export hosts without passwords or post-login commands</small></span>
+              <button class="text-button settings-action" id="export-ssh-config" type="button">Export…</button>
+            </div>
             <div class="settings-row settings-row-stack config-file-row">
               <span><strong>Configuration file</strong><small>GUI changes are written to this YAML file</small></span>
               <div class="config-file-actions">

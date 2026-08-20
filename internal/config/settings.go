@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -23,22 +24,28 @@ const CurrentVersion = 1
 const maxConfigSize = 4 << 20
 
 type Settings struct {
-	Theme              string   `json:"theme" yaml:"theme"`
-	FontFamily         string   `json:"fontFamily" yaml:"fontFamily"`
-	FontSize           int      `json:"fontSize" yaml:"fontSize"`
-	DefaultPath        string   `json:"defaultPath" yaml:"defaultPath"`
-	Shell              string   `json:"shell" yaml:"shell,omitempty"`
-	ReduceTransparency bool     `json:"reduceTransparency" yaml:"reduceTransparency"`
-	ShowBlockMetadata  bool     `json:"showBlockMetadata" yaml:"showBlockMetadata"`
-	AIEnabled          bool     `json:"aiEnabled" yaml:"aiEnabled"`
-	AIModel            string   `json:"aiModel" yaml:"aiModel"`
-	OpenHomeOnLaunch   bool     `json:"openHomeOnLaunch" yaml:"openHomeOnLaunch"`
-	RunProjectCommands bool     `json:"runProjectCommands" yaml:"runProjectCommands"`
-	SSHHelperEnabled   bool     `json:"sshHelperEnabled" yaml:"sshHelperEnabled"`
-	MorningGreetings   []string `json:"morningGreetings" yaml:"morningGreetings"`
-	DayGreetings       []string `json:"dayGreetings" yaml:"dayGreetings"`
-	EveningGreetings   []string `json:"eveningGreetings" yaml:"eveningGreetings"`
-	NightGreetings     []string `json:"nightGreetings" yaml:"nightGreetings"`
+	Theme                   string   `json:"theme" yaml:"theme"`
+	FontFamily              string   `json:"fontFamily" yaml:"fontFamily"`
+	FontSize                int      `json:"fontSize" yaml:"fontSize"`
+	TerminalLineHeight      float64  `json:"terminalLineHeight" yaml:"terminalLineHeight"`
+	BlockDensity            string   `json:"blockDensity" yaml:"blockDensity"`
+	CursorStyle             string   `json:"cursorStyle" yaml:"cursorStyle"`
+	CursorBlink             bool     `json:"cursorBlink" yaml:"cursorBlink"`
+	ShellSyntaxHighlighting bool     `json:"shellSyntaxHighlighting" yaml:"shellSyntaxHighlighting"`
+	DefaultPath             string   `json:"defaultPath" yaml:"defaultPath"`
+	Shell                   string   `json:"shell" yaml:"shell,omitempty"`
+	ReduceTransparency      bool     `json:"reduceTransparency" yaml:"reduceTransparency"`
+	ShowBlockMetadata       bool     `json:"showBlockMetadata" yaml:"showBlockMetadata"`
+	ShowBlockTimestamps     bool     `json:"showBlockTimestamps" yaml:"showBlockTimestamps"`
+	AIEnabled               bool     `json:"aiEnabled" yaml:"aiEnabled"`
+	AIModel                 string   `json:"aiModel" yaml:"aiModel"`
+	OpenHomeOnLaunch        bool     `json:"openHomeOnLaunch" yaml:"openHomeOnLaunch"`
+	RunProjectCommands      bool     `json:"runProjectCommands" yaml:"runProjectCommands"`
+	SSHHelperEnabled        bool     `json:"sshHelperEnabled" yaml:"sshHelperEnabled"`
+	MorningGreetings        []string `json:"morningGreetings" yaml:"morningGreetings"`
+	DayGreetings            []string `json:"dayGreetings" yaml:"dayGreetings"`
+	EveningGreetings        []string `json:"eveningGreetings" yaml:"eveningGreetings"`
+	NightGreetings          []string `json:"nightGreetings" yaml:"nightGreetings"`
 }
 
 type Project struct {
@@ -101,20 +108,25 @@ var allowedServerIcons = map[string]struct{}{
 
 func Defaults() Settings {
 	return Settings{
-		Theme:              "system",
-		FontFamily:         "SF Mono",
-		FontSize:           13,
-		DefaultPath:        "~",
-		ShowBlockMetadata:  true,
-		AIEnabled:          true,
-		AIModel:            "qwen2.5-coder:0.5b",
-		OpenHomeOnLaunch:   true,
-		RunProjectCommands: true,
-		SSHHelperEnabled:   true,
-		MorningGreetings:   []string{"Morning. Ready when you are.", "A fresh start for good work.", "Good morning — let's build something."},
-		DayGreetings:       []string{"Good afternoon. Keep the momentum.", "Back to the craft.", "Your workspace is ready."},
-		EveningGreetings:   []string{"Good evening. One more thoughtful step.", "A quiet evening for focused work.", "Welcome back. Let's finish strong."},
-		NightGreetings:     []string{"Still creating? Your workspace is ready.", "A calm night for deep focus.", "Late hours, clear thoughts."},
+		Theme:                   "system",
+		FontFamily:              "SF Mono",
+		FontSize:                13,
+		TerminalLineHeight:      1.3,
+		BlockDensity:            "comfortable",
+		CursorStyle:             "block",
+		CursorBlink:             true,
+		ShellSyntaxHighlighting: true,
+		DefaultPath:             "~",
+		ShowBlockMetadata:       true,
+		AIEnabled:               true,
+		AIModel:                 "qwen2.5-coder:0.5b",
+		OpenHomeOnLaunch:        true,
+		RunProjectCommands:      true,
+		SSHHelperEnabled:        true,
+		MorningGreetings:        []string{"Morning. Ready when you are.", "A fresh start for good work.", "Good morning — let's build something."},
+		DayGreetings:            []string{"Good afternoon. Keep the momentum.", "Back to the craft.", "Your workspace is ready."},
+		EveningGreetings:        []string{"Good evening. One more thoughtful step.", "A quiet evening for focused work.", "Welcome back. Let's finish strong."},
+		NightGreetings:          []string{"Still creating? Your workspace is ready.", "A calm night for deep focus.", "Late hours, clear thoughts."},
 	}
 }
 
@@ -503,6 +515,31 @@ func Normalize(value Settings) (Settings, error) {
 	}
 	if value.FontSize < 10 || value.FontSize > 24 {
 		return Settings{}, errors.New("font size must be between 10 and 24")
+	}
+	if value.TerminalLineHeight == 0 {
+		value.TerminalLineHeight = defaults.TerminalLineHeight
+	}
+	if math.IsNaN(value.TerminalLineHeight) || math.IsInf(value.TerminalLineHeight, 0) ||
+		value.TerminalLineHeight < 1.2 || value.TerminalLineHeight > 2 {
+		return Settings{}, errors.New("terminal line height must be between 1.2 and 2.0")
+	}
+	value.BlockDensity = strings.ToLower(strings.TrimSpace(value.BlockDensity))
+	if value.BlockDensity == "" {
+		value.BlockDensity = defaults.BlockDensity
+	}
+	switch value.BlockDensity {
+	case "compact", "comfortable", "spacious":
+	default:
+		return Settings{}, errors.New("block density must be compact, comfortable, or spacious")
+	}
+	value.CursorStyle = strings.ToLower(strings.TrimSpace(value.CursorStyle))
+	if value.CursorStyle == "" {
+		value.CursorStyle = defaults.CursorStyle
+	}
+	switch value.CursorStyle {
+	case "block", "bar", "underline":
+	default:
+		return Settings{}, errors.New("cursor style must be block, bar, or underline")
 	}
 	value.DefaultPath = strings.TrimSpace(value.DefaultPath)
 	if value.DefaultPath == "" {

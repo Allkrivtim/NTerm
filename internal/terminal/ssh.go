@@ -3,8 +3,6 @@ package terminal
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -106,6 +104,7 @@ type sshSession struct {
 	home        string
 	hostname    string
 	platform    string
+	environment string
 
 	mu            sync.RWMutex
 	reconnectMu   sync.Mutex
@@ -119,6 +118,7 @@ type sshSession struct {
 	statusHandler func(SSHStatus)
 	lastActivity  time.Time
 	latency       time.Duration
+	commandShell  *blockShell
 }
 
 var knownHostsMu sync.Mutex
@@ -619,7 +619,12 @@ func (r *sshSession) connectionLost(cause error) {
 	}
 	r.connected = false
 	client := r.client
+	commandShell := r.commandShell
+	r.commandShell = nil
 	r.mu.Unlock()
+	if commandShell != nil {
+		commandShell.Close()
+	}
 	if client != nil {
 		_ = client.Close()
 	}
@@ -690,6 +695,7 @@ func (r *sshSession) reconnect(ctx context.Context, immediate bool) error {
 			return errors.New("ssh: session is closed")
 		}
 		oldClient := r.client
+		oldCommandShell := r.commandShell
 		oldHelper := r.helperPath
 		r.client, r.connection = fresh.client, fresh.connection
 		newClient := r.client
@@ -697,6 +703,7 @@ func (r *sshSession) reconnect(ctx context.Context, immediate bool) error {
 		newHelper := r.helperPath
 		r.hostname, r.platform, r.cwd = fresh.hostname, fresh.platform, fresh.cwd
 		r.commands = nil
+		r.commandShell = nil
 		r.connected = true
 		r.reconnecting = false
 		r.lastActivity = time.Now()
@@ -705,6 +712,9 @@ func (r *sshSession) reconnect(ctx context.Context, immediate bool) error {
 		fresh.client = nil
 		fresh.connection = nil
 		r.mu.Unlock()
+		if oldCommandShell != nil {
+			oldCommandShell.Close()
+		}
 		go r.watchClient(newClient)
 		if oldClient != nil {
 			_ = oldClient.Close()
@@ -798,73 +808,45 @@ func (r *sshSession) run(ctx context.Context, session *Session, block *domain.Bl
 		emit(domain.OutputChunk{BlockID: block.ID, Stream: "stderr", Data: "SSH is offline. Reconnect failed: " + err.Error() + "\n"})
 		return err
 	}
-	r.mu.RLock()
-	cwd, shell, client := r.cwd, r.shell, r.client
-	r.mu.RUnlock()
-	marker, err := newRemoteMetadataMarker()
-	if err != nil {
-		return err
-	}
-	script := "export TERM=xterm-256color COLORTERM=truecolor CLICOLOR=1\ncd " + shellQuote(cwd) + " || exit 1\n" + block.Command + "\nnterm_status=$?\nprintf " + shellQuote(marker+"%s\\037%s\\036\\n") + " \"$nterm_status\" \"$PWD\"\nexit \"$nterm_status\""
-	remoteCommand := shellQuote(shell) + " -lc " + shellQuote(script)
-	channel, err := client.NewSession()
-	if err != nil {
-		if isSSHTransportError(err) {
-			r.connectionLost(err)
-		}
-		return fmt.Errorf("ssh: open terminal channel: %w", err)
-	}
-	defer channel.Close()
 	session.mu.RLock()
 	cols, rows := session.cols, session.rows
 	session.mu.RUnlock()
-	modes := ssh.TerminalModes{ssh.ECHO: 1, ssh.TTY_OP_ISPEED: 38400, ssh.TTY_OP_OSPEED: 38400}
-	if err := channel.RequestPty("xterm-256color", int(rows), int(cols), modes); err != nil {
-		return fmt.Errorf("ssh: request PTY: %w", err)
-	}
-	input, err := channel.StdinPipe()
+	commandShell, err := r.ensureCommandShell(cols, rows)
 	if err != nil {
-		return fmt.Errorf("ssh: open terminal input: %w", err)
-	}
-	filter := &remoteOutputFilter{blockID: block.ID, emit: emit, prefix: []byte(marker), status: -1}
-	output := &lockedWriter{writer: filter, afterWrite: r.touch}
-	channel.Stdout = output
-	channel.Stderr = output
-	if err := channel.Start(remoteCommand); err != nil {
 		if isSSHTransportError(err) {
 			r.connectionLost(err)
 		}
-		return fmt.Errorf("ssh: start remote command: %w", err)
+		return err
 	}
-	if err := session.attachInput(input, func(cols, rows uint16) error {
-		return channel.WindowChange(int(rows), int(cols))
-	}, channel.Close); err != nil {
-		return fmt.Errorf("ssh: write buffered terminal input: %w", err)
-	}
-	done := make(chan error, 1)
-	go func() { done <- channel.Wait() }()
-	var waitErr error
-	select {
-	case <-ctx.Done():
-		_ = channel.Signal(ssh.SIGINT)
-		_ = channel.Close()
-		waitErr = ctx.Err()
-	case waitErr = <-done:
-	}
+	_ = commandShell.Resize(cols, rows)
+	result, waitErr := commandShell.Execute(ctx, block.Command, func(value []byte) {
+		r.touch()
+		emit(domain.NewOutputChunkBytes(block.ID, "stdout", value))
+	}, func() error {
+		return session.attachInput(commandShell, commandShell.Resize, nil)
+	})
 	session.mu.Lock()
-	session.activeInput = nil
-	session.activeResize = nil
-	session.activeClose = nil
-	session.mu.Unlock()
-	filter.Flush()
-	if filter.cwd != "" {
-		r.mu.Lock()
-		r.cwd = filter.cwd
-		r.mu.Unlock()
-		block.FinalCWD = filter.cwd
+	if session.activeInput == commandShell {
+		session.activeInput = nil
+		session.activeResize = nil
+		session.activeClose = nil
 	}
-	if filter.status >= 0 && filter.status != 0 && waitErr == nil {
-		return exitError{code: filter.status}
+	session.mu.Unlock()
+	r.mu.Lock()
+	if commandShell.Closed() && r.commandShell == commandShell {
+		r.commandShell = nil
+	}
+	if result.CWD != "" {
+		r.cwd = result.CWD
+	}
+	r.environment = result.Environment
+	r.mu.Unlock()
+	if result.CWD != "" {
+		block.FinalCWD = result.CWD
+	}
+	block.Environment = result.Environment
+	if result.Status != 0 && waitErr == nil {
+		return exitError{code: result.Status}
 	}
 	if isSSHTransportError(waitErr) {
 		r.connectionLost(waitErr)
@@ -880,12 +862,91 @@ func (r *sshSession) run(ctx context.Context, session *Session, block *domain.Bl
 	return waitErr
 }
 
-func newRemoteMetadataMarker() (string, error) {
-	var nonce [16]byte
-	if _, err := rand.Read(nonce[:]); err != nil {
-		return "", fmt.Errorf("ssh: create command metadata marker: %w", err)
+func (r *sshSession) environmentLabel() string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.environment
+}
+
+func (r *sshSession) ensureCommandShell(cols, rows uint16) (*blockShell, error) {
+	r.mu.RLock()
+	existing := r.commandShell
+	client, shellPath, cwd := r.client, r.shell, r.cwd
+	connected, closed := r.connected, r.closed
+	r.mu.RUnlock()
+	if closed || !connected || client == nil {
+		return nil, errors.New("ssh: session is offline")
 	}
-	return "\x1eNTERM_META_" + hex.EncodeToString(nonce[:]) + "\x1f", nil
+	if existing != nil && !existing.Closed() {
+		return existing, nil
+	}
+	started, err := startRemoteBlockShell(client, shellPath, cwd, cols, rows, r.touch)
+	if err != nil {
+		return nil, err
+	}
+	r.mu.Lock()
+	if r.client != client || !r.connected || r.closed {
+		r.mu.Unlock()
+		started.Close()
+		return nil, errors.New("ssh: connection changed while opening terminal")
+	}
+	if r.commandShell != nil && !r.commandShell.Closed() {
+		existing = r.commandShell
+		r.mu.Unlock()
+		started.Close()
+		return existing, nil
+	}
+	r.commandShell = started
+	r.mu.Unlock()
+	return started, nil
+}
+
+func startRemoteBlockShell(client *ssh.Client, shellPath, cwd string, cols, rows uint16, touch func()) (*blockShell, error) {
+	channel, err := client.NewSession()
+	if err != nil {
+		return nil, fmt.Errorf("ssh: open persistent terminal channel: %w", err)
+	}
+	modes := ssh.TerminalModes{ssh.ECHO: 1, ssh.TTY_OP_ISPEED: 38400, ssh.TTY_OP_OSPEED: 38400}
+	if err := channel.RequestPty("xterm-256color", int(rows), int(cols), modes); err != nil {
+		_ = channel.Close()
+		return nil, fmt.Errorf("ssh: request persistent PTY: %w", err)
+	}
+	input, err := channel.StdinPipe()
+	if err != nil {
+		_ = channel.Close()
+		return nil, fmt.Errorf("ssh: open persistent terminal input: %w", err)
+	}
+	reader, writer := io.Pipe()
+	output := &lockedWriter{writer: writer, afterWrite: touch}
+	channel.Stdout = output
+	channel.Stderr = output
+	remoteCommand := "cd " + shellQuote(cwd) + " || exit 1; " +
+		"export TERM=xterm-256color COLORTERM=truecolor CLICOLOR=1 CLICOLOR_FORCE=1; exec " +
+		shellQuote(shellPath) + " -l -i"
+	if err := channel.Start(remoteCommand); err != nil {
+		_ = writer.Close()
+		_ = reader.Close()
+		_ = channel.Close()
+		return nil, fmt.Errorf("ssh: start persistent shell: %w", err)
+	}
+	result := &blockShell{
+		input: input,
+		resize: func(cols, rows uint16) error {
+			return channel.WindowChange(int(rows), int(cols))
+		},
+	}
+	result.closeTransport = func() {
+		_ = input.Close()
+		_ = channel.Close()
+		_ = writer.Close()
+	}
+	go result.readLoop(reader)
+	go func() {
+		waitErr := channel.Wait()
+		_ = writer.CloseWithError(waitErr)
+		result.transportEnded(waitErr)
+	}()
+	return result, nil
 }
 
 func (r *sshSession) completePath(ctx context.Context, token string) []RemotePathEntry {
@@ -1030,9 +1091,14 @@ func (r *sshSession) close(cleanRemote bool) {
 	r.connected = false
 	helper := r.helperPath
 	client := r.client
+	commandShell := r.commandShell
+	r.commandShell = nil
 	stop := r.keepaliveStop
 	done := r.keepaliveDone
 	r.mu.Unlock()
+	if commandShell != nil {
+		commandShell.Close()
+	}
 	if cleanRemote && helper != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
 		_, _ = execSSHClient(ctx, client, nil, "rm -rf -- "+shellQuote(filepath.Dir(helper)))
@@ -1082,7 +1148,7 @@ func (f *remoteOutputFilter) Write(value []byte) (int, error) {
 	}
 	if index := bytes.Index(f.pending, prefix); index >= 0 {
 		if index > 0 {
-			f.emit(domain.OutputChunk{BlockID: f.blockID, Stream: "stdout", Data: string(f.pending[:index])})
+			f.emit(domain.NewOutputChunkBytes(f.blockID, "stdout", f.pending[:index]))
 		}
 		metadata := f.pending[index+len(prefix):]
 		if end := bytes.IndexByte(metadata, 0x1e); end >= 0 {
@@ -1099,7 +1165,7 @@ func (f *remoteOutputFilter) Write(value []byte) (int, error) {
 	keep := len(prefix) - 1
 	if len(f.pending) > keep {
 		cut := len(f.pending) - keep
-		f.emit(domain.OutputChunk{BlockID: f.blockID, Stream: "stdout", Data: string(f.pending[:cut])})
+		f.emit(domain.NewOutputChunkBytes(f.blockID, "stdout", f.pending[:cut]))
 		f.pending = append(f.pending[:0], f.pending[cut:]...)
 	}
 	return written, nil
@@ -1107,7 +1173,7 @@ func (f *remoteOutputFilter) Write(value []byte) (int, error) {
 
 func (f *remoteOutputFilter) Flush() {
 	if len(f.pending) > 0 {
-		f.emit(domain.OutputChunk{BlockID: f.blockID, Stream: "stdout", Data: string(f.pending)})
+		f.emit(domain.NewOutputChunkBytes(f.blockID, "stdout", f.pending))
 		f.pending = nil
 	}
 }

@@ -8,7 +8,9 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,6 +23,7 @@ import (
 	"github.com/alexandr/nterm/internal/gitstatus"
 	"github.com/alexandr/nterm/internal/secrets"
 	"github.com/alexandr/nterm/internal/terminal"
+	"github.com/alexandr/nterm/internal/workspace"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
@@ -33,6 +36,7 @@ type tabState struct {
 	predictCancel context.CancelFunc
 	predictID     uint64
 	pending       *pendingExecution
+	draft         string
 }
 
 type pendingExecution struct {
@@ -45,29 +49,34 @@ type pendingExecution struct {
 const rendererReadyTimeout = 15 * time.Second
 
 type App struct {
-	ctx          context.Context
-	ctxMu        sync.RWMutex
-	store        *config.Store
-	settings     config.Settings
-	document     config.Document
-	tabs         map[string]*tabState
-	tabOrder     []string
-	sequence     atomic.Uint64
-	predictor    *completion.LocalModelProvider
-	mu           sync.Mutex
-	startupError string
+	ctx             context.Context
+	ctxMu           sync.RWMutex
+	store           *config.Store
+	settings        config.Settings
+	document        config.Document
+	tabs            map[string]*tabState
+	tabOrder        []string
+	sequence        atomic.Uint64
+	predictor       *completion.LocalModelProvider
+	workspace       *workspace.Store
+	restored        workspace.Snapshot
+	activeTabID     string
+	mu              sync.Mutex
+	startupError    string
+	secondaryWindow bool
 }
 
 type InitialState struct {
-	Tabs         []domain.Tab    `json:"tabs"`
-	ActiveTabID  string          `json:"activeTabId"`
-	Settings     config.Settings `json:"settings"`
-	AIEnabled    bool            `json:"aiEnabled"`
-	Commands     []string        `json:"commands"`
-	Catalog      config.Catalog  `json:"catalog"`
-	ConfigPath   string          `json:"configPath"`
-	OpenHome     bool            `json:"openHome"`
-	StartupError string          `json:"startupError,omitempty"`
+	Tabs         []domain.Tab       `json:"tabs"`
+	ActiveTabID  string             `json:"activeTabId"`
+	Settings     config.Settings    `json:"settings"`
+	AIEnabled    bool               `json:"aiEnabled"`
+	Commands     []string           `json:"commands"`
+	Catalog      config.Catalog     `json:"catalog"`
+	ConfigPath   string             `json:"configPath"`
+	OpenHome     bool               `json:"openHome"`
+	StartupError string             `json:"startupError,omitempty"`
+	Workspace    workspace.Snapshot `json:"workspace"`
 }
 
 type LaunchSpec struct {
@@ -105,12 +114,35 @@ var connectSessionSSH = func(ctx context.Context, session *terminal.Session, pro
 	return session.ConnectSSH(ctx, profile)
 }
 
+const newWindowFlag = "--new-window"
+
+var (
+	currentExecutable   = os.Executable
+	currentPlatform     = goruntime.GOOS
+	launchWindowProcess = func(executable string, arguments ...string) error {
+		command := exec.Command(executable, arguments...)
+		command.Env = os.Environ()
+		if err := command.Start(); err != nil {
+			return err
+		}
+		return command.Process.Release()
+	}
+)
+
 func NewApp() (*App, error) {
+	return newApp(true)
+}
+
+func NewWindowApp() (*App, error) {
+	return newApp(false)
+}
+
+func newApp(persistWorkspace bool) (*App, error) {
 	store, err := config.NewStore()
 	if err != nil {
 		return nil, err
 	}
-	app, err := newAppWithStore(store)
+	app, err := newAppWithStoreMode(store, persistWorkspace)
 	if err == nil {
 		return app, nil
 	}
@@ -119,14 +151,29 @@ func NewApp() (*App, error) {
 	// safe in-memory defaults and surface the exact error so it can be fixed and
 	// reloaded from Settings.
 	document := config.DefaultsDocument()
-	return &App{
+	app = &App{
 		store: store, settings: document.Settings, document: document,
 		tabs: make(map[string]*tabState), predictor: completion.NewLocalModelProvider(),
-		startupError: err.Error(),
-	}, nil
+		startupError:    err.Error(),
+		secondaryWindow: !persistWorkspace,
+	}
+	if !persistWorkspace {
+		app.mu.Lock()
+		_, tabErr := app.newTabLocked("")
+		app.mu.Unlock()
+		if tabErr != nil {
+			app.predictor.Close()
+			return nil, tabErr
+		}
+	}
+	return app, nil
 }
 
 func newAppWithStore(store *config.Store) (*App, error) {
+	return newAppWithStoreMode(store, true)
+}
+
+func newAppWithStoreMode(store *config.Store, persistWorkspace bool) (*App, error) {
 	document, err := store.LoadDocument()
 	if err != nil {
 		return nil, err
@@ -136,17 +183,75 @@ func newAppWithStore(store *config.Store) (*App, error) {
 	}
 	app := &App{
 		store: store, settings: document.Settings, document: document, tabs: make(map[string]*tabState),
-		predictor: completion.NewLocalModelProvider(),
+		predictor:       completion.NewLocalModelProvider(),
+		secondaryWindow: !persistWorkspace,
 	}
-	if !document.Settings.OpenHomeOnLaunch {
+	if !persistWorkspace {
 		app.mu.Lock()
 		_, err = app.newTabLocked("")
 		app.mu.Unlock()
 		if err != nil {
+			app.predictor.Close()
 			return nil, err
 		}
+		return app, nil
+	}
+	workspaceStore, err := workspace.Open(filepath.Join(filepath.Dir(store.Path()), "workspace.db"))
+	if err != nil {
+		app.predictor.Close()
+		return nil, err
+	}
+	app.workspace = workspaceStore
+	snapshot, err := workspaceStore.Load()
+	if err != nil {
+		_ = workspaceStore.Close()
+		return nil, err
+	}
+	app.mu.Lock()
+	app.restoreWorkspaceLocked(snapshot)
+	if len(app.tabOrder) == 0 && !document.Settings.OpenHomeOnLaunch {
+		_, err = app.newTabLocked("")
+	}
+	app.mu.Unlock()
+	if err != nil {
+		_ = workspaceStore.Close()
+		return nil, err
 	}
 	return app, nil
+}
+
+func isNewWindowProcess(arguments []string) bool {
+	for _, argument := range arguments {
+		if argument == newWindowFlag {
+			return true
+		}
+	}
+	return false
+}
+
+// NewWindow starts another self-contained native Wails window. Wails v2 owns
+// exactly one webview per process, so a lightweight sibling process is the
+// supported isolation boundary for independent terminal sessions.
+func (a *App) NewWindow() error {
+	executable, err := currentExecutable()
+	if err != nil {
+		return fmt.Errorf("locate NTerm executable: %w", err)
+	}
+	command, arguments := newWindowProcessCommand(executable, currentPlatform)
+	if err := launchWindowProcess(command, arguments...); err != nil {
+		return fmt.Errorf("open NTerm window: %w", err)
+	}
+	return nil
+}
+
+func newWindowProcessCommand(executable, platform string) (string, []string) {
+	if platform == "darwin" {
+		bundle := filepath.Clean(filepath.Join(filepath.Dir(executable), "..", ".."))
+		if strings.HasSuffix(strings.ToLower(bundle), ".app") {
+			return "/usr/bin/open", []string{"-n", bundle, "--args", newWindowFlag}
+		}
+	}
+	return executable, []string{newWindowFlag}
 }
 
 func (a *App) startup(ctx context.Context) {
@@ -180,6 +285,9 @@ func (a *App) shutdown(context.Context) {
 		tab.session.Close()
 	}
 	a.predictor.Close()
+	if a.workspace != nil {
+		_ = a.workspace.Close()
+	}
 }
 
 func (a *App) emit(name string, data any) {
@@ -213,18 +321,21 @@ func (a *App) InitialState() InitialState {
 	for _, id := range a.tabOrder {
 		tabs = append(tabs, a.tabs[id].info)
 	}
-	activeID := ""
+	activeID := a.activeTabID
 	var commands []string
 	if len(a.tabOrder) > 0 {
-		activeID = a.tabOrder[0]
+		if _, ok := a.tabs[activeID]; !ok {
+			activeID = a.tabOrder[0]
+		}
 		commands = a.tabs[activeID].completion.Commands()
 	}
 	return InitialState{
 		Tabs: tabs, ActiveTabID: activeID, Settings: a.settings,
 		AIEnabled: a.settings.AIEnabled, Commands: commands,
 		Catalog:    a.catalogLocked(),
-		ConfigPath: a.store.Path(), OpenHome: a.settings.OpenHomeOnLaunch,
+		ConfigPath: a.store.Path(), OpenHome: a.settings.OpenHomeOnLaunch && !a.secondaryWindow,
 		StartupError: a.startupError,
+		Workspace:    a.restored,
 	}
 }
 
@@ -254,7 +365,89 @@ func (a *App) newTabLocked(requestedPath string) (domain.Tab, error) {
 	})
 	a.tabs[id] = &tabState{info: info, session: session, completion: completion.NewService(session, a.predictor)}
 	a.tabOrder = append(a.tabOrder, id)
+	a.activeTabID = id
+	if err := a.persistTabLocked(id); err != nil {
+		delete(a.tabs, id)
+		a.tabOrder = a.tabOrder[:len(a.tabOrder)-1]
+		session.Close()
+		return domain.Tab{}, err
+	}
+	if a.workspace != nil {
+		if err := a.workspace.SetActiveTab(id); err != nil {
+			_ = a.workspace.DeleteTab(id)
+			delete(a.tabs, id)
+			a.tabOrder = a.tabOrder[:len(a.tabOrder)-1]
+			a.activeTabID = ""
+			session.Close()
+			return domain.Tab{}, err
+		}
+	}
 	return info, nil
+}
+
+func (a *App) restoreWorkspaceLocked(snapshot workspace.Snapshot) {
+	restored := workspace.Snapshot{ActiveTabID: snapshot.ActiveTabID}
+	for _, saved := range snapshot.Tabs {
+		// Managed remote transports and their credentials are never resurrected.
+		// A remote tab can be opened again from Home when the user is ready.
+		if saved.Tab.Remote != "" {
+			if a.workspace != nil {
+				_ = a.workspace.DeleteTab(saved.Tab.ID)
+			}
+			continue
+		}
+		session, err := terminal.NewSessionAt(saved.Tab.CWD, a.settings.Shell)
+		if err != nil {
+			if a.workspace != nil {
+				_ = a.workspace.DeleteTab(saved.Tab.ID)
+			}
+			continue
+		}
+		saved.Tab.Running = false
+		history := make([]string, 0, len(saved.Blocks))
+		for _, record := range saved.Blocks {
+			history = append(history, record.Block.Command)
+		}
+		session.RestoreHistory(history)
+		id := saved.Tab.ID
+		session.ConfigureSSHProfile(terminal.SSHProfile{HelperEnabled: a.settings.SSHHelperEnabled, ConfirmHostKey: a.confirmSSHHostKey})
+		session.SetSSHStatusHandler(func(status terminal.SSHStatus) {
+			a.emit("ssh:status", SSHStatusEvent{TabID: id, SSHStatus: status})
+		})
+		a.tabs[id] = &tabState{
+			info: saved.Tab, session: session, completion: completion.NewService(session, a.predictor), draft: saved.Draft,
+		}
+		a.tabOrder = append(a.tabOrder, id)
+		restored.Tabs = append(restored.Tabs, saved)
+	}
+	if _, ok := a.tabs[snapshot.ActiveTabID]; ok {
+		a.activeTabID = snapshot.ActiveTabID
+	} else if len(a.tabOrder) > 0 {
+		a.activeTabID = a.tabOrder[0]
+		restored.ActiveTabID = a.activeTabID
+	}
+	a.restored = restored
+}
+
+func (a *App) persistTabLocked(tabID string) error {
+	if a.workspace == nil {
+		return nil
+	}
+	tab := a.tabs[tabID]
+	if tab == nil {
+		return errors.New("tab not found")
+	}
+	if tab.info.Remote != "" {
+		return a.workspace.DeleteTab(tabID)
+	}
+	position := 0
+	for index, id := range a.tabOrder {
+		if id == tabID {
+			position = index
+			break
+		}
+	}
+	return a.workspace.SaveTab(tab.info, tab.draft, position)
 }
 
 func (a *App) CloseTab(tabID string) (CloseTabResult, error) {
@@ -263,6 +456,11 @@ func (a *App) CloseTab(tabID string) (CloseTabResult, error) {
 	tab, ok := a.tabs[tabID]
 	if !ok {
 		return CloseTabResult{}, errors.New("tab not found")
+	}
+	if a.workspace != nil {
+		if err := a.workspace.DeleteTab(tabID); err != nil {
+			return CloseTabResult{}, err
+		}
 	}
 	if tab.cancel != nil {
 		tab.cancel()
@@ -290,7 +488,53 @@ func (a *App) CloseTab(tabID string) (CloseTabResult, error) {
 		}
 		result.ActiveID = a.tabOrder[closedIndex]
 	}
+	a.activeTabID = result.ActiveID
+	if a.workspace != nil {
+		_ = a.workspace.SetActiveTab(result.ActiveID)
+	}
 	return result, nil
+}
+
+func (a *App) ActivateTab(tabID string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if _, ok := a.tabs[tabID]; !ok {
+		return errors.New("tab not found")
+	}
+	a.activeTabID = tabID
+	if a.workspace != nil {
+		return a.workspace.SetActiveTab(tabID)
+	}
+	return nil
+}
+
+func (a *App) SaveDraft(tabID, draft string) error {
+	a.mu.Lock()
+	tab := a.tabs[tabID]
+	if tab == nil {
+		a.mu.Unlock()
+		return errors.New("tab not found")
+	}
+	tab.draft = draft
+	remote := tab.info.Remote != ""
+	a.mu.Unlock()
+	if a.workspace != nil && !remote {
+		return a.workspace.SetDraft(tabID, draft)
+	}
+	return nil
+}
+
+func (a *App) ClearBlocks(tabID string) error {
+	a.mu.Lock()
+	_, ok := a.tabs[tabID]
+	a.mu.Unlock()
+	if !ok {
+		return errors.New("tab not found")
+	}
+	if a.workspace != nil {
+		return a.workspace.ClearFinishedBlocks(tabID)
+	}
+	return nil
 }
 
 func (a *App) Execute(tabID, command string) (domain.Block, error) {
@@ -317,6 +561,14 @@ func (a *App) Execute(tabID, command string) (domain.Block, error) {
 	block := domain.Block{
 		ID: id, TabID: tabID, Command: command, CWD: tab.session.CWD(),
 		State: domain.BlockRunning, StartedAt: time.Now(),
+	}
+	if a.workspace != nil && tab.info.Remote == "" {
+		if err := a.workspace.SaveBlock(block); err != nil {
+			cancel()
+			tab.session.EndInput()
+			a.mu.Unlock()
+			return domain.Block{}, err
+		}
 	}
 	tab.cancel = cancel
 	tab.runningID = id
@@ -377,18 +629,28 @@ func (a *App) expirePendingBlock(tabID, blockID string) {
 		Data: "NTerm could not start the command because the terminal renderer did not become ready.\n",
 	})
 	terminal.Finish(&pending.block, errors.New("terminal renderer readiness timed out"), false)
+	if a.workspace != nil {
+		_ = a.workspace.SaveBlock(pending.block)
+	}
 	a.emit("block:done", domain.BlockFinished{Block: pending.block})
 }
 
 func (a *App) run(ctx context.Context, cancel context.CancelFunc, tabID string, tab *tabState, block domain.Block) {
 	err := tab.session.Run(ctx, &block, func(chunk domain.OutputChunk) {
 		chunk.TabID = tabID
+		if a.workspace != nil {
+			_ = a.workspace.AppendOutput(block.ID, string(chunk.Bytes()))
+		}
 		a.emit("block:output", chunk)
 	})
 	tab.session.EndInput()
 	block.Remote = tab.session.RemoteLabel()
+	block.Environment = tab.session.Environment()
 	cancelled := errors.Is(ctx.Err(), context.Canceled)
 	terminal.Finish(&block, err, cancelled)
+	if a.workspace != nil {
+		_ = a.workspace.SaveBlock(block)
+	}
 
 	a.mu.Lock()
 	if current, ok := a.tabs[tabID]; ok && current == tab {
@@ -400,11 +662,13 @@ func (a *App) run(ctx context.Context, cancel context.CancelFunc, tabID string, 
 		tab.pending = nil
 		tab.info.CWD = tab.session.CWD()
 		tab.info.Remote = tab.session.RemoteLabel()
+		tab.info.Environment = tab.session.Environment()
 		if tab.info.Remote != "" {
 			tab.info.Title = tab.info.Remote
 		} else {
 			tab.info.Title = tabTitle(tab.info.CWD)
 		}
+		_ = a.persistTabLocked(tabID)
 	}
 	a.mu.Unlock()
 	cancel()
@@ -434,6 +698,9 @@ func (a *App) Cancel(tabID, blockID string) bool {
 	if pending != nil {
 		tab.session.EndInput()
 		terminal.Finish(&pending.block, context.Canceled, true)
+		if a.workspace != nil {
+			_ = a.workspace.SaveBlock(pending.block)
+		}
 		a.emit("block:done", domain.BlockFinished{Block: pending.block})
 	}
 	return true
@@ -587,6 +854,10 @@ func (a *App) OpenProject(projectID string) (LaunchSpec, error) {
 			return LaunchSpec{}, err
 		}
 		a.tabs[tab.ID].info.Title = project.Name
+		if err := a.persistTabLocked(tab.ID); err != nil {
+			a.mu.Unlock()
+			return LaunchSpec{}, err
+		}
 		tab = a.tabs[tab.ID].info
 		a.mu.Unlock()
 		commands := []string{}
@@ -677,6 +948,9 @@ func (a *App) connectSSHLaunch(tabID string, profile terminal.SSHProfile) (domai
 	cancel()
 	if err != nil {
 		a.mu.Lock()
+		if a.workspace != nil {
+			_ = a.workspace.DeleteTab(tabID)
+		}
 		delete(a.tabs, tabID)
 		for index, id := range a.tabOrder {
 			if id == tabID {
@@ -691,6 +965,10 @@ func (a *App) connectSSHLaunch(tabID string, profile terminal.SSHProfile) (domai
 	a.mu.Lock()
 	tab.info.CWD = tab.session.CWD()
 	tab.info.Remote = tab.session.RemoteLabel()
+	tab.info.Environment = tab.session.Environment()
+	if a.workspace != nil {
+		_ = a.workspace.DeleteTab(tabID)
+	}
 	info := tab.info
 	a.mu.Unlock()
 	return info, nil

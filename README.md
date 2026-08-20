@@ -6,7 +6,9 @@ working directory stay together as selectable blocks.
 
 ## Current functionality
 
-- independent tabs with persistent working directories and command history;
+- multiple native windows and independent tabs with persistent working directories, drafts, command blocks
+  and bounded output history restored after restart;
+- searchable command/output blocks with one-click command reruns;
 - native PTY execution, 24-bit colour and a bundled VT renderer for TUI apps;
 - interactive input for prompts, password requests, REPLs and installers;
 - deterministic history, command, option and path completion followed by an
@@ -18,7 +20,10 @@ working directory stay together as selectable blocks.
   disconnect;
 - SSH passwords and key passphrases stored in macOS Keychain; private keys stay
   in their original files;
-- light, dark and system themes, configurable terminal font and size;
+- SSH host profiles can be exported as a standard OpenSSH client config without
+  credentials or NTerm-specific post-login commands;
+- light, dark and system themes; configurable terminal font, size, line height,
+  block density, interactive cursor, syntax colours and block timestamps;
 - YAML configuration at `~/Library/Application Support/NTerm/config.yml`;
 - copying one block or a selection of commands and output.
 
@@ -27,7 +32,7 @@ packaging and signed/notarized distribution are separate platform milestones.
 
 ## Development
 
-Prerequisites: Go 1.25+ (the module selects the patched Go 1.26.5 toolchain) and
+Prerequisites: Go 1.25+ (the module selects the patched Go 1.26.6 toolchain) and
 the macOS command-line developer tools. Node and npm
 are not required because the frontend is dependency-free and committed as
 static assets.
@@ -73,6 +78,8 @@ Suggestions are inserted into the editor and never executed automatically.
 | `Control+C` | Send interrupt to the running process |
 | `Control+L` | Clear blocks when no process is running |
 | `Command+K` | Focus and select the composer |
+| `Command+N` | Open a new window |
+| `Command+F` | Search commands and output in the active tab |
 | `Command+T` | Open a tab |
 | `Command+W` | Close the active tab |
 | `Command+1…9` | Switch tabs |

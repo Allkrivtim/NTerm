@@ -37,14 +37,18 @@ cancelled. Command text, cwd, timestamps and exit status are metadata; output is
 an append-only stream. This makes search, rerun, sharing and persistence
 possible without scraping the screen.
 
-### ADR-003: PTY execution with a dedicated alternate-screen surface
+### ADR-003: one canonical VT state for blocks and alternate screen
 
-Every command now runs in a Unix PTY and the UI owns a bundled xterm.js VT state
-machine. Ordinary output remains in immutable blocks. When a program selects an
-alternate screen—or is a known full-screen application—the working area swaps
-to the VT surface while retaining the native tab bar. Raw keyboard input and
-window-size changes flow back to the PTY. Exiting restores the block list and
-composer. Windows still requires a ConPTY adapter.
+Every command runs in a Unix PTY and every tab owns a bundled xterm.js VT state
+machine. Exact PTY bytes enter that state machine before the UI decides how to
+present them. The normal buffer is projected into an immutable command block;
+the alternate buffer is shown directly as the full-screen working surface.
+There is no command-name allowlist and no regex-based TUI detection.
+
+Raw keyboard input and window-size changes flow back to the PTY. Switching tabs
+only changes which tab-owned renderer is visible; it does not destroy and replay
+the terminal stream. Exiting the alternate screen restores the normal-buffer
+block list and composer. Windows still requires a ConPTY adapter.
 
 ### ADR-004: completion is a provider pipeline
 
@@ -73,12 +77,18 @@ Host metadata and a boolean credential reference live in `config.yml`.
 Passwords and passphrases live in macOS Keychain. Private keys remain on disk,
 must be regular files and are rejected when group or other permission bits are
 set. Secrets are never returned to the renderer or written to application logs.
+Exporting host profiles produces an OpenSSH-compatible file containing aliases,
+addresses, ports, users and identity-file references only. The native save
+dialog controls the destination and overwrite confirmation; NTerm never silently
+edits an existing `~/.ssh/config`.
 
 ### ADR-006: SSH is a managed transport, not a local shell mode
 
 NTerm uses the Go SSH protocol implementation directly. A tab owns one
-authenticated SSH transport and opens a separate protocol channel for each
-block. Transport state is therefore independent from command state: the UI can
+authenticated SSH transport and one persistent interactive shell channel for
+command blocks. Shell variables, functions, aliases, working directory and TTY
+state therefore survive between blocks, while transport health remains
+independent from command state: the UI can
 show latency and connection health, detect an orderly close immediately, probe
 half-open links with encrypted keepalive requests and reconnect without
 replacing the tab.
@@ -125,6 +135,7 @@ internal/domain        Stable block and session data contracts
 internal/terminal      Shell process lifecycle and cwd state
 internal/completion    Provider pipeline and local model adapter
 internal/config        Validated, atomically persisted preferences
+internal/workspace     Versioned SQLite workspace and block history
 frontend/dist          Dependency-free editor and block renderer
 scripts                Reproducible self-contained macOS packaging
 ```
@@ -135,7 +146,7 @@ Potential future packages:
 internal/pty           Future Windows ConPTY adapter and platform abstraction
 internal/vt            Future native/GPU replacement for the bundled VT renderer
 internal/ssh           Host profiles and host-key policy beyond the current managed OpenSSH transport
-internal/store         SQLite repositories and migrations
+internal/store         Future repositories beyond the workspace store
 internal/secrets       OS credential-vault adapters
 ```
 
@@ -157,7 +168,7 @@ sequenceDiagram
     S->>P: start in session cwd
     loop output chunks
         P-->>S: stdout / stderr
-        S-->>C: block:output
+        S-->>C: block:output (exact bytes, base64 at JSON boundary)
     end
     P-->>S: exit status and final cwd
     S-->>C: block:done
@@ -177,9 +188,17 @@ that serializes input, resize and signal messages for its PTY.
 - state and exit code;
 - output chunks tagged stdout/stderr.
 
-Output is sent incrementally and should not be duplicated inside every event.
-When persistence lands, chunks will be compacted into bounded compressed
-segments and indexed separately from metadata.
+Output is sent incrementally. PTY reads are encoded as base64 at the JSON
+boundary because a read can split a UTF-8 code point; the renderer gives the
+decoded bytes directly to the VT parser. Human-readable application errors may
+still use the compatible text field.
+Finished local blocks, drafts and tab ordering are persisted in a versioned
+SQLite workspace beside `config.yml`. Restored blocks are inert history:
+processes, SSH transports and secrets are never resurrected, and a block that
+was running at shutdown is restored as cancelled. Output is bounded to 4 MiB
+per block and the most recent 500 blocks per tab are loaded into the renderer.
+Future migrations can compact output into compressed segments and add a
+separate full-text index without changing the block contract.
 
 ## Security boundaries
 
@@ -194,10 +213,11 @@ segments and indexed separately from metadata.
 ## Known product limitations
 
 - Unix uses a PTY; Windows still needs its ConPTY implementation.
-- ANSI support in the renderer covers common SGR colors, not the complete VT
-  standard.
-- Cwd persistence relies on a private descriptor written by the shell after a
-  command; an explicit `exit` command may prevent the update.
+- Restored historical output is currently stored as a bounded raw stream; a
+  future workspace migration should persist the final cell-grid snapshot too,
+  so historical blocks are independent of their original viewport width.
+- Shell state and cwd are captured by nonce-scoped control frames. A clean
+  local `exit` ends the current shell and the next block starts a fresh one.
 - Completion currently assumes the caret is at the end of the draft. The next
   editor iteration passes caret/token ranges to providers.
 - Reconnecting the transport does not preserve a foreground remote process.

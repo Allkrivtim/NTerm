@@ -1,6 +1,7 @@
 package config
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -13,6 +14,12 @@ func TestStoreRoundTrip(t *testing.T) {
 	want.Theme = "dark"
 	want.FontFamily = "Menlo"
 	want.FontSize = 15
+	want.TerminalLineHeight = 1.7
+	want.BlockDensity = "compact"
+	want.CursorStyle = "bar"
+	want.CursorBlink = false
+	want.ShellSyntaxHighlighting = false
+	want.ShowBlockTimestamps = true
 	want.DefaultPath = t.TempDir()
 	want.ReduceTransparency = true
 	want.NightGreetings = []string{"Quiet night.", "Keep going."}
@@ -33,6 +40,26 @@ func TestNormalizeRejectsInvalidValues(t *testing.T) {
 	settings.FontSize = 42
 	if _, err := Normalize(settings); err == nil {
 		t.Fatal("expected invalid font size error")
+	}
+	settings = Defaults()
+	settings.TerminalLineHeight = 2.5
+	if _, err := Normalize(settings); err == nil {
+		t.Fatal("expected invalid terminal line height error")
+	}
+	settings = Defaults()
+	settings.TerminalLineHeight = math.NaN()
+	if _, err := Normalize(settings); err == nil {
+		t.Fatal("expected non-finite terminal line height error")
+	}
+	settings = Defaults()
+	settings.BlockDensity = "microscopic"
+	if _, err := Normalize(settings); err == nil {
+		t.Fatal("expected invalid block density error")
+	}
+	settings = Defaults()
+	settings.CursorStyle = "beam"
+	if _, err := Normalize(settings); err == nil {
+		t.Fatal("expected invalid cursor style error")
 	}
 	settings = Defaults()
 	settings.DefaultPath = filepath.Join(t.TempDir(), "missing")
@@ -128,6 +155,11 @@ func TestLoadDocumentKeepsDefaultsForMissingSettings(t *testing.T) {
 	}
 	if !document.Settings.OpenHomeOnLaunch || !document.Settings.RunProjectCommands || !document.Settings.SSHHelperEnabled {
 		t.Fatalf("missing settings lost their defaults: %#v", document.Settings)
+	}
+	if document.Settings.TerminalLineHeight != Defaults().TerminalLineHeight ||
+		document.Settings.BlockDensity != "comfortable" || document.Settings.CursorStyle != "block" ||
+		!document.Settings.CursorBlink || !document.Settings.ShellSyntaxHighlighting {
+		t.Fatalf("missing customization settings lost their defaults: %#v", document.Settings)
 	}
 	if len(document.Settings.MorningGreetings) != 3 || len(document.Settings.NightGreetings) != 3 {
 		t.Fatalf("missing greeting lists lost their defaults: %#v", document.Settings)

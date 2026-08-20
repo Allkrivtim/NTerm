@@ -61,8 +61,9 @@ completion and Git experience without a permanent server install.
 
 ## Phase 3 — advanced sessions
 
-1. Restore window/tab layout after restart without resurrecting secrets.
-2. Search, pin, copy and rerun blocks; command palettes and split panes.
+1. Restore local tab layout, drafts and bounded block history after restart
+   without resurrecting processes or secrets (complete); window geometry remains.
+2. Search, copy and rerun blocks (complete); pinning, command palettes and split panes remain.
 3. Crash isolation and per-session resource limits.
 4. Opt-in tmux control-mode integration for reattaching an interrupted remote
    TUI or long-running process; keep the current reconnect-only fallback when
@@ -72,8 +73,8 @@ Exit criterion: a failed or noisy session cannot freeze other tabs.
 
 ## Phase 4 — SSH host vault
 
-1. Host profiles, tags, jump hosts, proxy commands and import from
-   `~/.ssh/config`.
+1. Host profiles and OpenSSH export are complete; tags, jump hosts, proxy
+   commands and import from `~/.ssh/config` remain.
 2. Host-key verification with explicit first-use and changed-key UX.
 3. Credentials behind a `SecretStore` interface:
    macOS Keychain, Windows Credential Manager and Linux Secret Service.
@@ -86,7 +87,8 @@ application database or logs.
 
 ## Phase 5 — product hardening
 
-1. SQLite migrations, backup/export, diagnostics and structured redacted logs.
+1. SQLite migrations (initial workspace schema complete), backup/export,
+   diagnostics and structured redacted logs.
 2. Accessibility, IME, international keyboards and screen-reader review.
 3. Signed/notarized builds, auto-update, sandbox and dependency audit.
 4. Benchmarks for startup, input latency, scrollback memory and large output.

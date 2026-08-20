@@ -8,16 +8,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/alexandr/nterm/internal/domain"
 	"github.com/alexandr/nterm/internal/gitstatus"
-	"github.com/creack/pty"
 )
 
 var ErrBusy = errors.New("a command is already running in this session")
@@ -29,10 +26,11 @@ type Session struct {
 	inputMu      sync.Mutex
 	cwd          string
 	localCWD     string
-	previous     string
 	shell        string
+	environment  string
 	history      []string
 	running      bool
+	localShell   *blockShell
 	remote       *sshSession
 	activeInput  io.Writer
 	pendingInput []byte
@@ -109,10 +107,32 @@ func (s *Session) History() []string {
 	return result
 }
 
+// RestoreHistory seeds completion and arrow-key history from persisted command
+// blocks without replaying any command or shell state.
+func (s *Session) RestoreHistory(history []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(history) > maxSessionHistory {
+		history = history[len(history)-maxSessionHistory:]
+	}
+	s.history = append([]string(nil), history...)
+}
+
 func (s *Session) Shell() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.shell
+}
+
+func (s *Session) Environment() string {
+	s.mu.RLock()
+	remote := s.remote
+	environment := s.environment
+	s.mu.RUnlock()
+	if remote != nil {
+		return remote.environmentLabel()
+	}
+	return environment
 }
 
 func (s *Session) ConfigureSSHProfile(profile SSHProfile) {
@@ -170,7 +190,6 @@ func (s *Session) ConnectSSH(ctx context.Context, profile SSHProfile) error {
 	s.remote = connected
 	s.localCWD = s.cwd
 	s.cwd = connected.cwd
-	s.previous = ""
 	s.sshProfile = profile
 	s.mu.Unlock()
 	return nil
@@ -233,24 +252,13 @@ func (s *Session) Run(ctx context.Context, block *domain.Block, emit func(domain
 		s.remote = connected
 		s.localCWD = cwd
 		s.cwd = connected.cwd
-		s.previous = ""
 		s.mu.Unlock()
 		block.FinalCWD = connected.cwd
 		emit(domain.OutputChunk{BlockID: block.ID, Stream: "stdout", Data: "Connected to " + connected.label() + "\n"})
 		return nil
 	}
 
-	if target, ok, err := s.cdTarget(block.Command, cwd); ok {
-		if err != nil {
-			emit(domain.OutputChunk{BlockID: block.ID, Stream: "stderr", Data: err.Error() + "\n"})
-			return exitError{code: 1}
-		}
-		s.setCWD(target)
-		block.FinalCWD = target
-		return nil
-	}
-
-	return s.runShell(ctx, cwd, block, emit)
+	return s.runShell(ctx, block, emit)
 }
 
 func (s *Session) ReconnectSSH(ctx context.Context) error {
@@ -267,8 +275,10 @@ func (s *Session) ReconnectSSH(ctx context.Context) error {
 func (s *Session) Close() {
 	s.mu.Lock()
 	remote := s.remote
+	localShell := s.localShell
 	activeClose := s.activeClose
 	s.remote = nil
+	s.localShell = nil
 	s.activeInput = nil
 	s.activeResize = nil
 	s.activeClose = nil
@@ -280,6 +290,9 @@ func (s *Session) Close() {
 	}
 	if remote != nil {
 		remote.close(true)
+	}
+	if localShell != nil {
+		localShell.Close()
 	}
 }
 
@@ -415,154 +428,83 @@ func (s *Session) GitContext(ctx context.Context) (gitstatus.Info, bool) {
 	return remote.gitContext(ctx)
 }
 
-func (s *Session) runShell(ctx context.Context, cwd string, block *domain.Block, emit func(domain.OutputChunk)) error {
-	cwdFile, err := os.CreateTemp("", "nterm-cwd-*")
+func (s *Session) runShell(ctx context.Context, block *domain.Block, emit func(domain.OutputChunk)) error {
+	shell, err := s.ensureLocalShell()
 	if err != nil {
-		return fmt.Errorf("create cwd marker: %w", err)
+		return err
 	}
-	cwdPath := cwdFile.Name()
-	_ = cwdFile.Close()
-	defer os.Remove(cwdPath)
-
-	command := block.Command + "\nnterm_status=$?\nprintf '%s' \"$PWD\" > " + shellQuote(cwdPath) + "\nexit \"$nterm_status\""
-	cmd := exec.Command(s.shell, "-l", "-c", command)
-	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(),
-		"TERM=xterm-256color",
-		"COLORTERM=truecolor",
-		"CLICOLOR=1",
-		"CLICOLOR_FORCE=1",
-		"LSCOLORS=GxFxCxDxBxegedabagaced",
-		"LS_COLORS=di=34:ln=36:so=35:pi=33:ex=32:*.zip=33:*.tar=33:*.tgz=33:*.gz=33:*.bz2=33:*.xz=33:*.zst=33:*.7z=33:*.rar=33:*.dmg=33:*.pkg=33:*.go=36:*.rs=36:*.js=36:*.ts=36:*.tsx=36:*.jsx=36:*.py=36:*.swift=36:*.java=36:*.kt=36:*.c=36:*.h=36:*.cpp=36:*.hpp=36:*.json=35:*.yaml=35:*.yml=35:*.toml=35:*.md=35:*.pdf=35:*.png=35:*.jpg=35:*.jpeg=35:*.gif=35:*.webp=35",
-	)
-	waitErr := s.runPTY(ctx, cmd, func(value []byte) {
-		emit(domain.OutputChunk{BlockID: block.ID, Stream: "stdout", Data: string(value)})
-	})
-
-	if finalCWDBytes, cwdErr := os.ReadFile(cwdPath); cwdErr == nil {
-		finalCWD := strings.TrimSpace(string(finalCWDBytes))
-		if finalCWD != "" {
-			s.setCWD(finalCWD)
-			block.FinalCWD = finalCWD
-		}
-	}
-	return waitErr
-}
-
-func (s *Session) runPTY(ctx context.Context, cmd *exec.Cmd, consume func([]byte)) error {
 	s.mu.RLock()
-	size := &pty.Winsize{Cols: s.cols, Rows: s.rows}
+	cols, rows := s.cols, s.rows
 	s.mu.RUnlock()
-	terminal, err := pty.StartWithSize(cmd, size)
-	if err != nil {
-		return fmt.Errorf("start PTY: %w", err)
-	}
-	if err := s.attachInput(terminal, func(cols, rows uint16) error {
-		return pty.Setsize(terminal, &pty.Winsize{Cols: cols, Rows: rows})
-	}, terminal.Close); err != nil {
-		_ = terminal.Close()
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		return fmt.Errorf("write buffered terminal input: %w", err)
-	}
-
-	processDone := make(chan struct{})
-	go stopProcessOnCancel(ctx, cmd, processDone)
-	buffer := make([]byte, 16*1024)
-	for {
-		read, readErr := terminal.Read(buffer)
-		if read > 0 {
-			consume(buffer[:read])
-		}
-		if readErr != nil {
-			break
-		}
-	}
-	waitErr := cmd.Wait()
-	close(processDone)
+	_ = shell.Resize(cols, rows)
+	result, err := shell.Execute(ctx, block.Command, func(value []byte) {
+		emit(domain.NewOutputChunkBytes(block.ID, "stdout", value))
+	}, func() error {
+		return s.attachInput(shell, shell.Resize, nil)
+	})
 	s.mu.Lock()
-	s.activeInput = nil
-	s.activeResize = nil
-	s.activeClose = nil
+	if s.activeInput == shell {
+		s.activeInput = nil
+		s.activeResize = nil
+		s.activeClose = nil
+	}
+	if shell.Closed() && s.localShell == shell {
+		s.localShell = nil
+	}
 	s.mu.Unlock()
-	_ = terminal.Close()
-	return waitErr
+	if result.CWD != "" {
+		s.setCWD(result.CWD)
+		block.FinalCWD = result.CWD
+	}
+	s.mu.Lock()
+	s.environment = result.Environment
+	s.mu.Unlock()
+	block.Environment = result.Environment
+	if err != nil {
+		if ExitCode(err) == 0 {
+			block.FinalCWD = s.CWD()
+			return nil
+		}
+		return err
+	}
+	if result.Status != 0 {
+		return exitError{code: result.Status}
+	}
+	return nil
 }
 
-func stopProcessOnCancel(ctx context.Context, cmd *exec.Cmd, done <-chan struct{}) {
-	select {
-	case <-ctx.Done():
-		if runtime.GOOS != "windows" {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGINT)
-		} else {
-			_ = cmd.Process.Signal(os.Interrupt)
-		}
-		timer := time.NewTimer(600 * time.Millisecond)
-		defer timer.Stop()
-		select {
-		case <-done:
-			return
-		case <-timer.C:
-			if runtime.GOOS != "windows" {
-				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			} else {
-				_ = cmd.Process.Kill()
-			}
-		}
-	case <-done:
+func (s *Session) ensureLocalShell() (*blockShell, error) {
+	s.mu.RLock()
+	existing := s.localShell
+	cwd, shellPath, cols, rows := s.cwd, s.shell, s.cols, s.rows
+	s.mu.RUnlock()
+	if existing != nil && !existing.Closed() {
+		return existing, nil
 	}
+	started, err := startLocalBlockShell(shellPath, cwd, cols, rows)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	if s.localShell != nil && !s.localShell.Closed() {
+		existing = s.localShell
+		s.mu.Unlock()
+		started.Close()
+		return existing, nil
+	}
+	s.localShell = started
+	s.mu.Unlock()
+	return started, nil
 }
 
 func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
-func (s *Session) cdTarget(command, cwd string) (string, bool, error) {
-	trimmed := strings.TrimSpace(command)
-	if trimmed != "cd" && !strings.HasPrefix(trimmed, "cd ") {
-		return "", false, nil
-	}
-	raw := strings.TrimSpace(strings.TrimPrefix(trimmed, "cd"))
-	if strings.ContainsAny(raw, ";&|\n") {
-		return "", false, nil
-	}
-	raw = strings.Trim(raw, "\"'")
-	if raw == "" || raw == "~" {
-		raw, _ = os.UserHomeDir()
-	} else if raw == "-" {
-		s.mu.RLock()
-		raw = s.previous
-		s.mu.RUnlock()
-		if raw == "" {
-			return "", true, errors.New("cd: OLDPWD not set")
-		}
-	} else if strings.HasPrefix(raw, "~/") {
-		home, _ := os.UserHomeDir()
-		raw = filepath.Join(home, strings.TrimPrefix(raw, "~/"))
-	} else if !filepath.IsAbs(raw) {
-		raw = filepath.Join(cwd, raw)
-	}
-	target, err := filepath.Abs(raw)
-	if err != nil {
-		return "", true, fmt.Errorf("cd: %w", err)
-	}
-	info, err := os.Stat(target)
-	if err != nil {
-		return "", true, fmt.Errorf("cd: %s: %w", raw, err)
-	}
-	if !info.IsDir() {
-		return "", true, fmt.Errorf("cd: %s: not a directory", raw)
-	}
-	return filepath.Clean(target), true, nil
-}
-
 func (s *Session) setCWD(cwd string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if cwd != s.cwd {
-		s.previous = s.cwd
-		s.cwd = cwd
-	}
+	s.cwd = cwd
 }
 
 func ExitCode(err error) int {
